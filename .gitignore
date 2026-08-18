@@ -47,3 +47,8 @@
 # Python
 __pycache__/
 *.pyc
+
+# Runtime data
+autoffmpeg.log
+autoffmpeg.log.old
+autoffmpeg_queue.json
