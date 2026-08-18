@@ -1,0 +1,49 @@
+# PureBasic source files
+*.pb
+*.pbi
+*.pbp
+*.pbf
+*.pbt
+*.pbv
+*.pbd
+
+# Audio files
+*.mp3
+*.wav
+*.aac
+*.flac
+*.ogg
+*.oga
+*.m4a
+*.wma
+*.opus
+*.ac3
+*.dts
+*.ape
+*.alac
+
+# Video files
+*.avi
+*.mkv
+*.mp4
+*.m4v
+*.mov
+*.wmv
+*.flv
+*.webm
+*.mpg
+*.mpeg
+*.vob
+*.ts
+*.m2ts
+*.m2v
+*.mts
+*.3gp
+*.3g2
+*.asf
+*.rm
+*.rmvb
+
+# Python
+__pycache__/
+*.pyc
