@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # AutoFFmpegGui v2 - PyQt6
 # SPDX-License-Identifier: EUPL-1.2
 # Licensed under the EUPL v1.2 (see LICENSE file in the project root).
-"""Thin launcher that starts AutoFFmpegGui."""
+"""AutoFFmpegGui - a PyQt6 front end for FFmpeg."""
 
-from autoffmpeg.app import main
+from .config import APP_VERSION
 
-if __name__ == "__main__":
-    main()
+__all__ = ["APP_VERSION"]
