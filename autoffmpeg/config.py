@@ -61,20 +61,25 @@ def static_ffplay_sources():
     return []
 
 
+DOVI_TOOL_VERSION = "2.3.3"
+
+
 def static_dovi_source():
     """Return (url, label) for the dovi_tool archive, or (None, reason)."""
     base = "https://github.com/quietvoid/dovi_tool/releases/latest/download/"
+    v = DOVI_TOOL_VERSION
     if IS_WINDOWS:
-        return (base + "dovi_tool-x86_64-pc-windows-msvc.zip",
+        return (base + f"dovi_tool-{v}-x86_64-pc-windows-msvc.zip",
                 "dovi_tool Windows x64 ZIP")
     if platform.system() == "Darwin":
-        return (base + "dovi_tool-universal-macOS.zip", "dovi_tool macOS ZIP")
+        return (base + f"dovi_tool-{v}-universal-macOS.zip",
+                "dovi_tool macOS ZIP")
     machine = platform.machine().lower()
     if platform.system() == "Linux" and machine in ("x86_64", "amd64"):
-        return (base + "dovi_tool-x86_64-unknown-linux-musl.tar.gz",
+        return (base + f"dovi_tool-{v}-x86_64-unknown-linux-musl.tar.gz",
                 "dovi_tool Linux x64 TAR.GZ")
     if platform.system() == "Linux" and machine in ("aarch64", "arm64"):
-        return (base + "dovi_tool-aarch64-unknown-linux-musl.tar.gz",
+        return (base + f"dovi_tool-{v}-aarch64-unknown-linux-musl.tar.gz",
                 "dovi_tool Linux ARM64 TAR.GZ")
     return None, "unsupported platform"
 
