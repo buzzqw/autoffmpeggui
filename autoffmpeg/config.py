@@ -101,11 +101,44 @@ CODECS = {
 }
 X_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
              "medium", "slow", "slower", "veryslow"]
+# (name, family, raw ffmpeg args) for profiles built on raw command lines.
+RAW_PRESETS = [
+    ("VP9 - best", "vp9", "-c:v libvpx-vp9 -deadline best"),
+    ("VP9 - good", "vp9", "-c:v libvpx-vp9 -deadline good"),
+    ("VP9 - realtime", "vp9",
+     "-c:v libvpx-vp9 -deadline realtime -cpu-used 8"),
+    ("AV1 - 0", "av1", "-c:v libsvtav1 -preset 0"),
+    ("AV1 - 4", "av1", "-c:v libsvtav1 -preset 4"),
+    ("AV1 - 8", "av1", "-c:v libsvtav1 -preset 8"),
+    ("AV1 - 10", "av1", "-c:v libsvtav1 -preset 10"),
+    ("AV1 - 12", "av1", "-c:v libsvtav1 -preset 12"),
+    ("ProRes Proxy", "prores", "-c:v prores_ks -profile:v proxy"),
+    ("ProRes LT", "prores", "-c:v prores_ks -profile:v lt"),
+    ("ProRes 422", "prores", "-c:v prores_ks -profile:v 422"),
+    ("ProRes HQ", "prores", "-c:v prores_ks -profile:v hq"),
+    ("ProRes 4444", "prores", "-c:v prores_ks -profile:v 4444"),
+    ("ProRes 4444 XQ", "prores", "-c:v prores_ks -profile:v 4444xq"),
+    ("DNxHR LB", "dnxhd", "-c:v dnxhd -profile:v dnxhr_lb"),
+    ("DNxHR SQ", "dnxhd", "-c:v dnxhd -profile:v dnxhr_sq"),
+    ("DNxHR HQ", "dnxhd", "-c:v dnxhd -profile:v dnxhr_hq"),
+    ("DNxHR HQX", "dnxhd", "-c:v dnxhd -profile:v dnxhr_hqx"),
+    ("DNxHR 444", "dnxhd", "-c:v dnxhd -profile:v dnxhr_444"),
+    ("FFV1", "ffv1", "-c:v ffv1 -level 3"),
+]
 BUILTIN_PRESETS = (
-    ["H.264 - " + p for p in X_PRESETS]
-    + ["H.265 - " + p for p in X_PRESETS]
-    + ["H.264 - CRF", "H.265 - CRF", "MPEG-4", "Xvid", "MPEG-2", "WMV",
-       "H.264 - Copy video"]
+    [(f"H.264 - {p}", {"family": "x264", "xpreset": p}) for p in X_PRESETS]
+    + [(f"H.265 - {p}", {"family": "x265", "xpreset": p}) for p in X_PRESETS]
+    + [
+        ("H.264 - CRF", {"family": "x264"}),
+        ("H.265 - CRF", {"family": "x265"}),
+        ("MPEG-4", {"family": "mpeg4"}),
+        ("Xvid", {"family": "xvid"}),
+        ("MPEG-2", {"family": "mpeg2"}),
+        ("WMV", {"family": "wmv"}),
+        ("H.264 - Copy video", {"family": "copy"}),
+    ]
+    + [(name, {"family": fam, "rawargs": args.split()})
+       for name, fam, args in RAW_PRESETS]
 )
 HW_ACCELS = {
     "None": None,

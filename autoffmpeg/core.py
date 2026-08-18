@@ -358,7 +358,7 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
               family_supports_bitrate(family) and "-b:v" not in args
               and "-crf" not in args and "-qscale:v" not in args):
             args += ["-b:v", f"{bitrate}k"]
-            if mode == "2-pass bitrate":
+            if mode == "2-pass bitrate" and family != "av1":
                 args += ["-pass", str(passno)]
         return args
 
@@ -367,8 +367,12 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
             return ["-c:v", CODECS[family],
                     "-preset", preset.get("xpreset", "medium"),
                     "-crf", str(quality)]
-        if family in ("vp9", "av1"):
+        if family == "av1":
             return ["-c:v", CODECS[family], "-crf", str(quality)]
+        if family == "vp9":
+            # libvpx-vp9 needs an explicit zero bitrate to enable CRF mode.
+            return ["-c:v", CODECS[family], "-crf", str(quality),
+                    "-b:v", "0"]
         return ["-c:v", CODECS[family], "-qscale:v", str(quality)]
 
     if mode in ("1-pass bitrate", "2-pass bitrate"):
@@ -380,7 +384,8 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
             args += ["-maxrate", f"{maxr}k", "-bufsize", f"{maxr * 2}k"]
         else:
             args = ["-c:v", CODECS[family], "-b:v", f"{bitrate}k"]
-        if mode == "2-pass bitrate":
+        if mode == "2-pass bitrate" and family != "av1":
+            # SVT-AV1 has no 2-pass mode.
             args += ["-pass", str(passno)]
         return args
     return ["-c:v", "copy"]

@@ -93,6 +93,54 @@ class TestVideoArgs(unittest.TestCase):
         self.assertEqual(args, ["-c:v", "h264_nvenc", "-cq", "24"])
 
 
+class TestNewPresets(unittest.TestCase):
+    def _opts(self, **kw):
+        o = EncodeOptions()
+        for k, v in kw.items():
+            setattr(o, k, v)
+        return o
+
+    def test_vp9_crf_adds_zero_bitrate(self):
+        o = self._opts(preset={"family": "vp9",
+                               "rawargs": "-c:v libvpx-vp9 -deadline good".split()},
+                       mode="Quality (CRF)", quality=30)
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args, ["-c:v", "libvpx-vp9", "-deadline", "good",
+                                "-crf", "30", "-b:v", "0"])
+
+    def test_av1_crf(self):
+        o = self._opts(preset={"family": "av1",
+                               "rawargs": "-c:v libsvtav1 -preset 8".split()},
+                       mode="Quality (CRF)", quality=30)
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args, ["-c:v", "libsvtav1", "-preset", "8",
+                                "-crf", "30"])
+
+    def test_av1_2pass_no_pass_opt(self):
+        o = self._opts(preset={"family": "av1",
+                               "rawargs": "-c:v libsvtav1 -preset 8".split()},
+                       mode="2-pass bitrate", bitrate=3000)
+        args = build_video_args(o, ProbeInfo(has_video=True), passno=1)
+        self.assertIn("-b:v", args)
+        self.assertNotIn("-pass", args)
+
+    def test_prores_profile(self):
+        o = self._opts(preset={"family": "prores",
+                               "rawargs": "-c:v prores_ks "
+                                          "-profile:v hq".split()},
+                       mode="Quality (CRF)", quality=16)
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args, ["-c:v", "prores_ks", "-profile:v", "hq"])
+
+    def test_dnxhr_profile(self):
+        o = self._opts(preset={"family": "dnxhd",
+                               "rawargs": "-c:v dnxhd "
+                                          "-profile:v dnxhr_hq".split()},
+                       mode="Quality (CRF)", quality=16)
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args, ["-c:v", "dnxhd", "-profile:v", "dnxhr_hq"])
+
+
 class TestHdrParts(unittest.TestCase):
     def test_sdr_tone_map(self):
         o = EncodeOptions(hdr_mode="SDR (tone map to BT.709)")

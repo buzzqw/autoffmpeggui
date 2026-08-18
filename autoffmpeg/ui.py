@@ -1035,20 +1035,7 @@ class AutoFfmpegGui(QMainWindow):
     def load_presets(self):
         self.preset_sources = {}
         self.cmb_preset.clear()
-        for name in BUILTIN_PRESETS:
-            if " - Copy" in name:
-                family = "copy"
-            elif name.startswith("H.264 - "):
-                family = "x264"
-            elif name.startswith("H.265 - "):
-                family = "x265"
-            else:
-                family = {"MPEG-4": "mpeg4", "Xvid": "xvid",
-                          "MPEG-2": "mpeg2", "WMV": "wmv"}.get(name, "x264")
-            src = {"family": family}
-            if family in ("x264", "x265") and name not in (
-                    "H.264 - CRF", "H.265 - CRF", "H.264 - Copy video"):
-                src["xpreset"] = name.rsplit(" - ", 1)[1]
+        for name, src in BUILTIN_PRESETS:
             self.preset_sources[name] = src
             self.cmb_preset.addItem(name)
 
