@@ -14,13 +14,14 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QSettings, QSize, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont, QIcon, QIntValidator
+from PyQt6.QtGui import (QDesktopServices, QFont, QIcon, QIntValidator,
+                          QDoubleValidator)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QLineEdit, QLabel,
     QGroupBox, QTabWidget, QComboBox, QSlider, QCheckBox, QSpinBox,
     QPlainTextEdit, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QProgressBar, QTextBrowser, QHBoxLayout, QVBoxLayout,
-    QGridLayout,
+    QGridLayout, QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView,
 )
 
 from .config import (
@@ -28,7 +29,9 @@ from .config import (
     APP_VERSION,
     BINARY_DIR,
     CONFIG_FILE,
+    CODECS,
     EUPL_BANNER,
+    ENCODER_OPTION_SPECS,
     HW_ACCELS,
     HW_ENCODERS,
     HDR_MODES,
@@ -36,6 +39,7 @@ from .config import (
     PAYPAL_URL,
     AUDIO_CODECS,
     AUDIO_BITRATES,
+    AUDIO_ENCODERS,
     BUILTIN_PRESETS,
     THEMES,
     app_settings,
@@ -44,26 +48,33 @@ from .config import (
     static_dovi_source,
     static_ffmpeg_source,
     static_ffplay_sources,
+    default_avisynth_plugin_paths,
     Binaries,
 )
 from .core import (
     AudioSelection,
+    AvisynthOptions,
     EncodeJob,
     EncodeOptions,
     Measure,
     ProbeInfo,
     SubtitleSelection,
     build_filter_args,
+    build_avisynth_script,
+    build_input_plan,
     build_ffmpeg_mux_command,
     build_jobs,
     build_mkvmerge_command,
     calc_bitrate_mb,
     cropdetect_command,
     detect_family,
+    encoder_option_catalog,
     extract_frames_command,
     job_from_dict,
     job_to_dict,
+    normalize_output,
     pb_profile_parse,
+    probe_duration,
     round_by,
 )
 from .workers import (
@@ -72,6 +83,10 @@ from .workers import (
     EncodeThread,
     HwDetectThread,
 )
+from .validation import preflight
+from .wizard import QuickEncodeWizard
+from .bluray import (BlurayOptions, bluray_input_options, bluray_root,
+                     bluray_url, is_bluray_path, scan_bluray)
 
 CHANNEL_CHOICES = [
     ("original", "original"),
@@ -81,12 +96,23 @@ CHANNEL_CHOICES = [
     ("7.1 (8)", "8"),
 ]
 POST_ACTIONS = ["None", "Notify when done", "Open output folder", "Shut down"]
+AVS_FILTERS = [
+    ("FFVideoSource", 'src = FFVideoSource("{{INPUT}}")'),
+    ("LWLibavVideoSource", 'src = LWLibavVideoSource("{{INPUT}}")'),
+    ("QTGMC Fast", 'src = src.QTGMC(preset="Fast")'),
+    ("Spline36 resize", "src = src.Spline36Resize(1280, 720)"),
+    ("AssumeFPS 23.976", "src = src.AssumeFPS(24000, 1001)"),
+    ("Trim frames", "src = src.Trim(0, 1000)"),
+    ("Sharpen", "src = src.LimitedSharpenFaster()"),
+    ("RemoveGrain", "src = src.RemoveGrain(mode=17)"),
+    ("KNLMeansCL", "src = src.KNLMeansCL(d=1, a=2, s=4)"),
+]
 QUEUE_FILE = os.path.join(APP_DIR, "autoffmpeg_queue.json")
 MEDIA_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".ts", ".mts", ".m2ts", ".vob", ".mpg",
     ".mpeg", ".wmv", ".flv", ".webm", ".ogm", ".m2v", ".m2t", ".vro",
     ".m4v", ".3gp", ".3g2", ".mka", ".mp3", ".flac", ".wav", ".aac",
-    ".ogg", ".ac3", ".dts",
+    ".ogg", ".ac3", ".dts", ".avs",
 }
 
 
@@ -94,10 +120,10 @@ def quick_duration(ffprobe, path):
     try:
         p = subprocess.run(
             [ffprobe, "-v", "quiet", "-print_format", "json",
-             "-show_format", path],
+             "-show_format", "-show_streams", path],
             capture_output=True, text=True, errors="replace", timeout=30)
         data = json.loads(p.stdout)
-        return float(data.get("format", {}).get("duration", 0) or 0)
+        return probe_duration(data)
     except Exception:
         return 0.0
 
@@ -117,8 +143,12 @@ class AutoFfmpegGui(QMainWindow):
         self.available_encoders = set()
         self.inputfile = ""
         self.outputfile = ""
+        self.output_base = ""
+        self.container = "mp4"
         self.lastdir = ""
         self.auto_output = True
+        self.bluray_enabled = False
+        self.advanced_mode = False
         self.probe = ProbeInfo()
         self.audio_tracks = []
         self.audio_rows = []
@@ -131,6 +161,8 @@ class AutoFfmpegGui(QMainWindow):
         self.mux_thread = None
         self.mux_rows = []
         self._had_failure = False
+        self.encoder_profile_overrides = {}
+        self._encoder_profile_name = ""
 
         self._rotate_log()
         self.build_ui()
@@ -162,14 +194,18 @@ class AutoFfmpegGui(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_video_tab(), "Video")
+        self.tabs.addTab(self.build_avisynth_tab(), "AviSynth+")
+        self.tabs.addTab(self.build_bluray_tab(), "Blu-ray")
         self.tabs.addTab(self.build_tracks_tab(), "Tracks")
         self.tabs.addTab(self.build_mux_tab(), "Muxing")
         self.tabs.addTab(self.build_info_tab(), "Info")
         self.tabs.addTab(self.build_queue_tab(), "Queue")
         self.tabs.addTab(self.build_ffmpeg_tab(), "FFmpeg")
         self.tabs.addTab(self.build_profiles_tab(), "Profiles")
+        self.tabs.addTab(self.build_encoder_options_tab(), "Encoder options")
         self.tabs.addTab(self.build_manual_tab(), "Manual")
         self.tabs.addTab(self.build_log_tab(), "Log")
+        self.set_advanced_mode(False)
         root.addWidget(self.tabs, 1)
 
         root.addWidget(self.build_command_group())
@@ -201,17 +237,34 @@ class AutoFfmpegGui(QMainWindow):
         self.btn_shots = QPushButton("Shots")
         self.btn_shots.setToolTip("Extract preview thumbnails with ffmpeg")
         grid.addWidget(self.btn_shots, 0, 6)
+        self.btn_wizard = QPushButton("Quick wizard")
+        self.btn_wizard.setToolTip("Guided setup for a complete encode job")
+        grid.addWidget(self.btn_wizard, 0, 7)
+        self.btn_bluray = QPushButton("Blu-ray...")
+        self.btn_bluray.setToolTip("Open a Blu-ray ISO or BDMV folder")
+        grid.addWidget(self.btn_bluray, 0, 8)
+        self.btn_advanced = QPushButton("Advanced options")
+        self.btn_advanced.setToolTip(
+            "Show expert profiles, AviSynth, Blu-ray, muxing and log tabs")
+        grid.addWidget(self.btn_advanced, 1, 7, 1, 2)
 
-        grid.addWidget(QLabel("Output:"), 1, 0)
+        grid.addWidget(QLabel("Output name:"), 1, 0)
         self.inp_output = QLineEdit()
-        self.inp_output.setToolTip("Output file path (auto-generated if empty)")
+        self.inp_output.setToolTip(
+            "Final output path without extension; choose the container next")
         grid.addWidget(self.inp_output, 1, 1)
+        self.cmb_container = QComboBox()
+        for label in ("MP4", "MKV", "MOV", "AVI"):
+            self.cmb_container.addItem(label, label.lower())
+        self.cmb_container.setToolTip(
+            "MP4 is muxed directly by FFmpeg; MKV uses mkvmerge when available")
+        grid.addWidget(self.cmb_container, 1, 2)
         self.btn_save = QPushButton("Browse...")
-        self.btn_save.setToolTip("Choose the output file")
-        grid.addWidget(self.btn_save, 1, 2)
+        self.btn_save.setToolTip("Choose the output base name")
+        grid.addWidget(self.btn_save, 1, 3)
         self.lbl_drop = QLabel("Drag & drop a file or folder here")
         self.lbl_drop.setStyleSheet("color: #6c7086;")
-        grid.addWidget(self.lbl_drop, 1, 3, 1, 4)
+        grid.addWidget(self.lbl_drop, 1, 4, 1, 5)
         return fg
 
     def build_command_group(self):
@@ -306,6 +359,10 @@ class AutoFfmpegGui(QMainWindow):
         self.btn_play.clicked.connect(self.play)
         self.btn_preview.clicked.connect(self.preview)
         self.btn_shots.clicked.connect(self.screenshots)
+        self.btn_wizard.clicked.connect(self.open_wizard)
+        self.btn_bluray.clicked.connect(self.choose_bluray_source)
+        self.btn_advanced.clicked.connect(
+            lambda: self.set_advanced_mode(not self.advanced_mode))
         self.btn_folder.clicked.connect(self.add_folder)
         self.btn_encode.clicked.connect(self.do_encode)
         self.btn_addqueue.clicked.connect(self.addtoqueue)
@@ -326,9 +383,13 @@ class AutoFfmpegGui(QMainWindow):
         self.inp_cds.returnPressed.connect(self.calc_bitrate)
         self.chk_nomux.toggled.connect(self.on_nomux_toggled)
         self.inp_output.textEdited.connect(
-            lambda _: setattr(self, "auto_output", False))
+            self.on_output_base_changed)
+        self.cmb_container.currentIndexChanged.connect(
+            lambda *_: self.on_container_changed())
         self.sld_trackwidth.valueChanged.connect(lambda _: self.on_size_pct())
         self.inp_width.textEdited.connect(lambda _: self.silentscale())
+        self.tbl_encoder_options.cellChanged.connect(
+            lambda *_: self.schedule_command_refresh())
 
     def _wire_command_signals(self):
         """Regenerate the command preview whenever a relevant option changes."""
@@ -348,12 +409,19 @@ class AutoFfmpegGui(QMainWindow):
             w.textEdited.connect(lambda *_: self.schedule_command_refresh())
         self.inp_hdr_meta.textChanged.connect(
             lambda *_: self.schedule_command_refresh())
+        self.cmb_avs_source.currentTextChanged.connect(
+            lambda *_: self.schedule_command_refresh())
+        self.cmb_avs_filter_mode.currentTextChanged.connect(
+            lambda *_: self.schedule_command_refresh())
+        self.inp_avs_plugins.textChanged.connect(
+            lambda *_: self.schedule_command_refresh())
         for w in (self.chk_deinterlace, self.chk_nomux, self.chk_chapters,
                   self.chk_metadata, self.chk_resize, self.chk_normalize):
             w.toggled.connect(lambda *_: self.schedule_command_refresh())
 
     def schedule_command_refresh(self):
-        self._cmd_timer.start()
+        if hasattr(self, "_cmd_timer"):
+            self._cmd_timer.start()
 
     def _auto_refresh_command(self):
         if self.inputfile:
@@ -364,6 +432,23 @@ class AutoFfmpegGui(QMainWindow):
             self, "Thanks For Your Support!",
             "Without your donation AutoFFmpegGui will be never a better application!")
         QDesktopServices.openUrl(QUrl(PAYPAL_URL))
+
+    def open_wizard(self):
+        self.wizard = QuickEncodeWizard(self)
+        self.wizard.show()
+
+    def set_advanced_mode(self, enabled):
+        self.advanced_mode = bool(enabled)
+        for title in ("AviSynth+", "Blu-ray", "Muxing", "Profiles",
+                      "Encoder options", "Log"):
+            index = next((i for i in range(self.tabs.count())
+                          if self.tabs.tabText(i) == title), -1)
+            if index >= 0:
+                self.tabs.setTabVisible(index, self.advanced_mode)
+        if hasattr(self, "btn_advanced"):
+            self.btn_advanced.setText(
+                "Hide advanced options" if self.advanced_mode
+                else "Advanced options")
 
     # ------------------------------------------------------------------ #
     # Tabs
@@ -615,6 +700,461 @@ class AutoFfmpegGui(QMainWindow):
         lay.addStretch(1)
         return w
 
+    def build_avisynth_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(7)
+        info = QLabel(
+            "AviSynth+ is an executable video source. AutoFFmpeg keeps audio "
+            "and subtitles from the original file when it generates a script; "
+            "an external .avs script is used as the complete source.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        cfg = QGroupBox("AviSynth source")
+        gl = QGridLayout(cfg)
+        self.chk_avisynth = QCheckBox("Enable AviSynth+ processing")
+        self.chk_avisynth.setToolTip(
+            "Generate/use an .avs video source before the FFmpeg encoder")
+        gl.addWidget(self.chk_avisynth, 0, 0, 1, 3)
+        gl.addWidget(QLabel("Source filter:"), 1, 0)
+        self.cmb_avs_source = QComboBox()
+        self.cmb_avs_source.addItems(
+            ["FFVideoSource", "LWLibavVideoSource", "AviSource"])
+        self.cmb_avs_source.setToolTip(
+            "Function used by the generated template; its plugin must be installed")
+        gl.addWidget(self.cmb_avs_source, 1, 1)
+        gl.addWidget(QLabel("Filter ownership:"), 1, 2)
+        self.cmb_avs_filter_mode = QComboBox()
+        self.cmb_avs_filter_mode.addItem("AviSynth script", "script")
+        self.cmb_avs_filter_mode.addItem("FFmpeg GUI filters", "ffmpeg")
+        self.cmb_avs_filter_mode.addItem("Both (advanced)", "both")
+        self.cmb_avs_filter_mode.setToolTip(
+            "Avoid duplicate resize/deinterlace processing unless Both is intentional")
+        gl.addWidget(self.cmb_avs_filter_mode, 1, 3)
+        gl.addWidget(QLabel("External script:"), 2, 0)
+        self.inp_avs_path = QLineEdit()
+        self.inp_avs_path.setToolTip(
+            "Optional existing .avs file. Leave empty to generate one from the editor")
+        self.btn_avs_browse = QPushButton("Browse...")
+        gl.addWidget(self.inp_avs_path, 2, 1, 1, 2)
+        gl.addWidget(self.btn_avs_browse, 2, 3)
+        gl.addWidget(QLabel("Plugin paths:"), 3, 0)
+        self.inp_avs_plugins = QLineEdit()
+        self.inp_avs_plugins.setPlaceholderText("path1.dll;path2.dll")
+        self.inp_avs_plugins.setToolTip("Optional DLL paths, separated by ;")
+        self.inp_avs_plugins.setText(";".join(default_avisynth_plugin_paths()))
+        gl.addWidget(self.inp_avs_plugins, 3, 1, 1, 3)
+        lay.addWidget(cfg)
+
+        self.txt_avs = QPlainTextEdit()
+        self.txt_avs.setFont(QFont("monospace", 9))
+        self.txt_avs.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.txt_avs.setPlaceholderText(
+            "Use {{INPUT}}, {{SOURCE_FILTER}}, {{PLUGIN_LOADS}} and "
+            "{{VIDEO_FILTERS}} in a generated script")
+        lay.addWidget(self.txt_avs, 1)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Insert filter:"))
+        self.cmb_avs_filter = QComboBox()
+        for name, snippet in AVS_FILTERS:
+            self.cmb_avs_filter.addItem(name, snippet)
+        self.btn_avs_insert_filter = QPushButton("Insert")
+        filter_row.addWidget(self.cmb_avs_filter, 1)
+        filter_row.addWidget(self.btn_avs_insert_filter)
+        lay.addLayout(filter_row)
+        row = QHBoxLayout()
+        self.btn_avs_template = QPushButton("Generate template")
+        self.btn_avs_load = QPushButton("Load script")
+        self.btn_avs_save = QPushButton("Save script")
+        self.btn_avs_validate = QPushButton("Validate")
+        self.btn_avs_preview = QPushButton("Preview")
+        for button in (self.btn_avs_template, self.btn_avs_load,
+                       self.btn_avs_save, self.btn_avs_validate,
+                       self.btn_avs_preview, self.cmb_avs_filter,
+                       self.btn_avs_insert_filter):
+            row.addWidget(button)
+        row.addStretch(1)
+        self.lbl_avs_status = QLabel("Disabled")
+        row.addWidget(self.lbl_avs_status)
+        lay.addLayout(row)
+        self.btn_avs_browse.clicked.connect(self.choose_avs_script)
+        self.btn_avs_template.clicked.connect(self.generate_avs_template)
+        self.btn_avs_load.clicked.connect(self.load_avs_script)
+        self.btn_avs_save.clicked.connect(self.save_avs_script)
+        self.btn_avs_validate.clicked.connect(self.validate_avs)
+        self.btn_avs_preview.clicked.connect(self.preview)
+        self.btn_avs_insert_filter.clicked.connect(self.insert_avs_filter)
+        self.chk_avisynth.toggled.connect(self.on_avisynth_toggled)
+        self.txt_avs.textChanged.connect(lambda: self.schedule_command_refresh())
+        self.inp_avs_path.textChanged.connect(lambda: self.schedule_command_refresh())
+        self.generate_avs_template()
+        self.on_avisynth_toggled(False)
+        return w
+
+    def insert_avs_filter(self):
+        snippet = self.cmb_avs_filter.currentData() or ""
+        if snippet:
+            self.txt_avs.insertPlainText("\n" + snippet + "\n")
+            self.lbl_avs_status.setText("Filter inserted")
+
+    def generate_avs_template(self):
+        if not self.txt_avs.toPlainText().strip() or \
+                self.sender() == self.btn_avs_template:
+            self.txt_avs.setPlainText(
+                '# AutoFFmpegGui AviSynth+ script\n'
+                '# Replace/add filters below as needed.\n'
+                '{{PLUGIN_LOADS}}\n'
+                'src = {{SOURCE_FILTER}}("{{INPUT}}")\n'
+                '{{VIDEO_FILTERS}}\n'
+                'src\n')
+        self.lbl_avs_status.setText("Template ready")
+
+    def on_avisynth_toggled(self, enabled):
+        for widget in (self.cmb_avs_source, self.cmb_avs_filter_mode,
+                       self.inp_avs_path, self.btn_avs_browse,
+                       self.inp_avs_plugins, self.txt_avs,
+                       self.btn_avs_template, self.btn_avs_load,
+                       self.btn_avs_save, self.btn_avs_validate,
+                       self.btn_avs_preview):
+            widget.setEnabled(enabled)
+        self.lbl_avs_status.setText("Enabled" if enabled else "Disabled")
+        self.schedule_command_refresh()
+
+    def choose_avs_script(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Open AviSynth script", self.lastdir,
+            "AviSynth scripts (*.avs);;All files (*.*)")
+        if f:
+            self.inp_avs_path.setText(f)
+            self.load_avs_script()
+
+    def load_avs_script(self):
+        path = self.get_text(self.inp_avs_path).strip()
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                self.txt_avs.setPlainText(fh.read())
+            self.lbl_avs_status.setText(f"Loaded {Path(path).name}")
+        except OSError as exc:
+            QMessageBox.warning(self, "AviSynth+", f"Could not load script: {exc}")
+
+    def save_avs_script(self):
+        path = self.get_text(self.inp_avs_path).strip()
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save AviSynth script", self.lastdir,
+                "AviSynth scripts (*.avs);;All files (*.*)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.txt_avs.toPlainText(), encoding="utf-8")
+            self.inp_avs_path.setText(path)
+            self.lbl_avs_status.setText(f"Saved {Path(path).name}")
+        except OSError as exc:
+            QMessageBox.warning(self, "AviSynth+", f"Could not save script: {exc}")
+
+    def validate_avs(self):
+        if not self.chk_avisynth.isChecked():
+            self.lbl_avs_status.setText("Disabled")
+            return
+        text = self.txt_avs.toPlainText().strip()
+        path = self.get_text(self.inp_avs_path).strip()
+        if path and not os.path.exists(path):
+            self.lbl_avs_status.setText("Script path does not exist")
+            return
+        if not text and not path:
+            self.lbl_avs_status.setText("Script is empty")
+            return
+        self.lbl_avs_status.setText(
+            "Syntax is evaluated by AviSynth/FFmpeg at preview or encode time")
+        self.log("[avisynth] script structure accepted; runtime validation deferred")
+
+    def build_bluray_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        info = QLabel(
+            "Blu-ray sources use FFmpeg's libbluray protocol. Choose an ISO or "
+            "BDMV folder, then select a playlist/title before analyzing it.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        form = QFormLayout()
+        row = QHBoxLayout()
+        self.inp_bluray_path = QLineEdit()
+        self.inp_bluray_path.setToolTip("ISO image or folder containing BDMV")
+        self.btn_bluray_choose = QPushButton("Browse...")
+        row.addWidget(self.inp_bluray_path, 1)
+        row.addWidget(self.btn_bluray_choose)
+        form.addRow("Source:", row)
+        self.cmb_bluray_titles = QComboBox()
+        self.cmb_bluray_titles.addItem("Automatic playlist", -1)
+        self.cmb_bluray_titles.currentIndexChanged.connect(
+            lambda *_: hasattr(self, "spin_bluray_playlist") and
+            self.spin_bluray_playlist.setValue(
+                self.cmb_bluray_titles.currentData() or -1))
+        form.addRow("Detected title:", self.cmb_bluray_titles)
+        self.spin_bluray_playlist = QSpinBox()
+        self.spin_bluray_playlist.setRange(-1, 99999)
+        self.spin_bluray_playlist.setValue(-1)
+        self.spin_bluray_playlist.setSpecialValueText("Automatic")
+        form.addRow("Playlist:", self.spin_bluray_playlist)
+        self.spin_bluray_angle = QSpinBox()
+        self.spin_bluray_angle.setRange(0, 254)
+        self.spin_bluray_angle.setSpecialValueText("Default")
+        form.addRow("Angle:", self.spin_bluray_angle)
+        self.spin_bluray_chapter = QSpinBox()
+        self.spin_bluray_chapter.setRange(1, 65534)
+        self.spin_bluray_chapter.setValue(1)
+        form.addRow("Chapter:", self.spin_bluray_chapter)
+        lay.addLayout(form)
+        buttons = QHBoxLayout()
+        self.btn_bluray_scan = QPushButton("Scan playlists")
+        self.btn_bluray_analyze = QPushButton("Use and analyze")
+        buttons.addWidget(self.btn_bluray_scan)
+        buttons.addWidget(self.btn_bluray_analyze)
+        buttons.addStretch(1)
+        lay.addLayout(buttons)
+        self.txt_bluray_info = QPlainTextEdit()
+        self.txt_bluray_info.setReadOnly(True)
+        self.txt_bluray_info.setPlaceholderText(
+            "Playlist scan details and libbluray diagnostics appear here.")
+        lay.addWidget(self.txt_bluray_info, 1)
+        self.btn_bluray_choose.clicked.connect(self.choose_bluray_source)
+        self.btn_bluray_scan.clicked.connect(self.scan_bluray_source)
+        self.btn_bluray_analyze.clicked.connect(self.use_bluray_source)
+        return w
+
+    def choose_bluray_source(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Blu-ray ISO", self.lastdir,
+            "Blu-ray image (*.iso);;All files (*.*)")
+        if not path:
+            path = QFileDialog.getExistingDirectory(
+                self, "Open Blu-ray BDMV folder", self.lastdir)
+        if path:
+            self.set_bluray_source(path)
+
+    def set_bluray_source(self, path):
+        if not is_bluray_path(path):
+            QMessageBox.warning(self, "Blu-ray",
+                                "Select an ISO or a folder containing BDMV.")
+            return
+        self.bluray_enabled = True
+        self.set_advanced_mode(True)
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == "Blu-ray":
+                self.tabs.setCurrentIndex(index)
+                break
+        self.inp_bluray_path.setText(path)
+        self.inp_input.setText(f"Blu-ray: {path}")
+        self.inputfile = path
+        self.lastdir = os.path.dirname(path) if os.path.isfile(path) else path
+        self.scan_bluray_source()
+
+    def scan_bluray_source(self):
+        path = self.get_text(self.inp_bluray_path).strip()
+        if not path:
+            return
+        result = scan_bluray(path)
+        text = result.get("raw") or result.get("error") or "No metadata returned."
+        self.txt_bluray_info.setPlainText(text)
+        self.cmb_bluray_titles.clear()
+        self.cmb_bluray_titles.addItem("Automatic playlist", -1)
+        for title in result.get("titles", []):
+            label = f"Playlist {title['playlist']}"
+            if title.get("duration"):
+                label += f" ({title['duration']})"
+            if title.get("chapters"):
+                label += f", {title['chapters']} chapters"
+            self.cmb_bluray_titles.addItem(label, title["playlist"])
+        if result.get("ok"):
+            self.log("[bluray] libbluray scan completed")
+        else:
+            self.log(f"[bluray] scan failed: {result.get('error', 'unknown error')}")
+
+    def use_bluray_source(self):
+        path = self.get_text(self.inp_bluray_path).strip()
+        if not path:
+            self.choose_bluray_source()
+            return
+        self.set_bluray_source(path)
+        self.analyze()
+
+    def build_encoder_options_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        info = QLabel(
+            "Options are attached to the selected video profile. Empty rows are "
+            "ignored; custom option names are accepted for newer encoder builds.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Profile family:"))
+        self.cmb_encoder_family = QComboBox()
+        self.cmb_encoder_family.addItems(["x264", "x265", "x266", "av1"])
+        self.cmb_encoder_family.setEnabled(False)
+        self.cmb_encoder_family.setToolTip(
+            "Selected automatically from the active video profile")
+        row.addWidget(self.cmb_encoder_family)
+        self.btn_encoder_catalog = QPushButton("Load catalog")
+        self.btn_encoder_clear = QPushButton("Clear overrides")
+        row.addWidget(self.btn_encoder_catalog)
+        row.addWidget(self.btn_encoder_clear)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.tbl_encoder_options = QTableWidget(0, 3)
+        self.tbl_encoder_options.setHorizontalHeaderLabels(
+            ["Option", "Value", "Description"])
+        self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self.tbl_encoder_options.setToolTip(
+            "FFmpeg encoder options without the leading dash")
+        lay.addWidget(self.tbl_encoder_options, 1)
+        self.cmb_encoder_family.currentTextChanged.connect(
+            lambda *_: self.load_encoder_catalog())
+        self.btn_encoder_catalog.clicked.connect(self.load_encoder_catalog)
+        self.btn_encoder_clear.clicked.connect(self.clear_encoder_overrides)
+        self.load_encoder_catalog()
+        return w
+
+    def load_encoder_catalog(self):
+        family = self.get_text(self.cmb_encoder_family)
+        current = self.encoder_profile_overrides.get(self._encoder_profile_name)
+        if current is None:
+            preset = self.current_preset()
+            current = {}
+            if preset.get("xpreset"):
+                current["preset"] = preset["xpreset"]
+            raw = list(preset.get("rawargs", []))
+            for index, token in enumerate(raw):
+                if not token.startswith("-") or token in ("-c:v", "-c"):
+                    continue
+                key = token.lstrip("-")
+                if index + 1 < len(raw) and not raw[index + 1].startswith("-"):
+                    current[key] = raw[index + 1]
+        catalog = encoder_option_catalog(family)
+        self.tbl_encoder_options.setRowCount(0)
+        for key, hint in catalog.items():
+            row = self.tbl_encoder_options.rowCount()
+            self.tbl_encoder_options.insertRow(row)
+            self.tbl_encoder_options.setItem(row, 0, QTableWidgetItem(key))
+            spec = ENCODER_OPTION_SPECS.get(family, {}).get(key, {})
+            self.tbl_encoder_options.setCellWidget(
+                row, 1, self.encoder_option_widget(
+                    spec, current.get(key, "")))
+            self.tbl_encoder_options.setItem(
+                row, 2, QTableWidgetItem(
+                    self.encoder_option_help(key, hint)))
+        self.tbl_encoder_options.insertRow(self.tbl_encoder_options.rowCount())
+        row = self.tbl_encoder_options.rowCount() - 1
+        custom_key = QTableWidgetItem("custom-option")
+        custom_key.setToolTip("Replace this name with any FFmpeg option")
+        self.tbl_encoder_options.setItem(row, 0, custom_key)
+        custom_value = QLineEdit()
+        custom_value.setPlaceholderText("value")
+        custom_value.textChanged.connect(lambda *_: self.schedule_command_refresh())
+        self.tbl_encoder_options.setCellWidget(row, 1, custom_value)
+        self.tbl_encoder_options.setItem(row, 2, QTableWidgetItem("Add any FFmpeg option"))
+
+    def encoder_option_help(self, key, hint):
+        help_text = {
+            "preset": "Speed versus compression efficiency",
+            "tune": "Optimize for content or latency",
+            "profile:v": "Decoder compatibility profile",
+            "crf": "Constant quality; lower is higher quality",
+            "bframes": "Maximum consecutive B-frames",
+            "ref": "Reference frame count",
+            "keyint": "Maximum GOP length in frames",
+            "min-keyint": "Minimum GOP length in frames",
+            "aq-mode": "Adaptive quantization mode",
+            "aq-strength": "Adaptive quantization intensity",
+            "cabac": "Enable CABAC entropy coding",
+            "sao": "Enable sample adaptive offset",
+            "me": "Motion estimation algorithm",
+            "subme": "Sub-pixel motion estimation effort",
+            "qp": "Constant quantizer value",
+            "usage": "AV1 usage mode",
+            "cpu-used": "AV1 speed versus quality preset",
+            "film-grain": "AV1 film grain synthesis strength",
+        }
+        return help_text.get(key, f"Encoder option; profile hint: {hint or 'default'}")
+
+    def encoder_option_widget(self, spec, value):
+        kind = spec.get("type", "text")
+        value = "" if value is None else str(value)
+        if kind == "choice":
+            widget = QComboBox()
+            for choice in spec.get("choices", []):
+                widget.addItem(choice or "Profile default", choice)
+            idx = widget.findData(value)
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            widget.currentIndexChanged.connect(
+                lambda *_: self.schedule_command_refresh())
+            return widget
+        if kind == "bool":
+            widget = QCheckBox("Enabled")
+            widget.setTristate(True)
+            if value in ("1", "true", "yes", "on"):
+                widget.setCheckState(Qt.CheckState.Checked)
+            elif value in ("0", "false", "no", "off"):
+                widget.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                widget.setCheckState(Qt.CheckState.PartiallyChecked)
+            widget.setToolTip("Partially checked = profile/FFmpeg default")
+            widget.stateChanged.connect(lambda *_: self.schedule_command_refresh())
+            return widget
+        widget = QLineEdit(value)
+        widget.setPlaceholderText("Profile default")
+        if kind == "int":
+            widget.setValidator(QIntValidator(
+                int(spec.get("min", -999999)), int(spec.get("max", 999999)),
+                widget))
+        elif kind == "float":
+            widget.setValidator(QDoubleValidator(
+                float(spec.get("min", -999999)), float(spec.get("max", 999999)),
+                3, widget))
+        widget.textChanged.connect(lambda *_: self.schedule_command_refresh())
+        return widget
+
+    def clear_encoder_overrides(self):
+        for row in range(self.tbl_encoder_options.rowCount()):
+            widget = self.tbl_encoder_options.cellWidget(row, 1)
+            if isinstance(widget, QComboBox):
+                idx = widget.findData("")
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+            elif isinstance(widget, QCheckBox):
+                widget.setCheckState(Qt.CheckState.PartiallyChecked)
+            elif isinstance(widget, QLineEdit):
+                widget.clear()
+        self.schedule_command_refresh()
+
+    def encoder_options_from_table(self):
+        values = {}
+        for row in range(self.tbl_encoder_options.rowCount()):
+            key = self.tbl_encoder_options.item(row, 0)
+            widget = self.tbl_encoder_options.cellWidget(row, 1)
+            if not key or not widget or not key.text().strip():
+                continue
+            value = ""
+            if isinstance(widget, QComboBox):
+                value = str(widget.currentData() or "")
+            elif isinstance(widget, QCheckBox):
+                if widget.checkState() == Qt.CheckState.Checked:
+                    value = "1"
+                elif widget.checkState() == Qt.CheckState.Unchecked:
+                    value = "0"
+            elif isinstance(widget, QLineEdit):
+                value = widget.text().strip()
+            if value:
+                values[key.text().strip()] = value
+        return values
+
     def build_tracks_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -783,16 +1323,28 @@ class AutoFfmpegGui(QMainWindow):
         row = QHBoxLayout()
         self.btn_remove_queue = QPushButton("Remove selected")
         self.btn_clear_queue = QPushButton("Clear")
+        self.btn_queue_up = QPushButton("Move up")
+        self.btn_queue_down = QPushButton("Move down")
+        self.btn_queue_duplicate = QPushButton("Duplicate")
+        self.btn_queue_inspect = QPushButton("Inspect command")
         self.btn_save_queue = QPushButton("Save queue")
         self.btn_load_queue = QPushButton("Load queue")
         row.addWidget(self.btn_remove_queue)
         row.addWidget(self.btn_clear_queue)
+        row.addWidget(self.btn_queue_up)
+        row.addWidget(self.btn_queue_down)
+        row.addWidget(self.btn_queue_duplicate)
+        row.addWidget(self.btn_queue_inspect)
         row.addWidget(self.btn_save_queue)
         row.addWidget(self.btn_load_queue)
         row.addStretch(1)
         lay.addLayout(row)
         self.btn_remove_queue.clicked.connect(self.remove_queue_item)
         self.btn_clear_queue.clicked.connect(self.list_queue.clear)
+        self.btn_queue_up.clicked.connect(lambda: self.move_queue_item(-1))
+        self.btn_queue_down.clicked.connect(lambda: self.move_queue_item(1))
+        self.btn_queue_duplicate.clicked.connect(self.duplicate_queue_item)
+        self.btn_queue_inspect.clicked.connect(self.inspect_queue_item)
         self.btn_save_queue.clicked.connect(self.save_queue)
         self.btn_load_queue.clicked.connect(self.load_queue)
         return w
@@ -884,7 +1436,8 @@ class AutoFfmpegGui(QMainWindow):
                      f"{dovi_url if dovi_url else 'not available'}")
         lines.append("")
         lines.append("## Detected binaries")
-        for name in ("ffmpeg", "ffprobe", "ffplay", "dovi"):
+        for name in ("ffmpeg", "ffprobe", "ffplay", "dovi", "mkvmerge",
+                     "lame", "faac", "oggenc"):
             path = getattr(self.binaries, name, None)
             ok = bool(path and os.path.exists(path))
             state = "OK" if ok else "missing"
@@ -892,6 +1445,9 @@ class AutoFfmpegGui(QMainWindow):
         if not self.binaries.has("dovi"):
             lines.append("\nDolby Vision needs `dovi_tool`: download it above "
                          "or put it in applications/.")
+        lines.append("\nMKV muxing uses mkvmerge when available; otherwise FFmpeg "
+                     "muxes with stream copy.")
+        lines.append("External audio encoders are optional: LAME, FAAC and oggenc.")
         self.ffmpeg_info.setMarkdown("\n".join(lines))
         self.btn_download_ffmpeg.setEnabled(bool(url))
         self.btn_download_dovi.setEnabled(bool(dovi_url))
@@ -899,6 +1455,9 @@ class AutoFfmpegGui(QMainWindow):
     def build_profiles_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        self.lbl_profile_summary = QLabel()
+        self.lbl_profile_summary.setWordWrap(True)
+        lay.addWidget(self.lbl_profile_summary)
         lay.addWidget(QLabel(
             "Edit profile.txt directly. One profile per line: "
             "Name;ffmpeg video arguments"))
@@ -914,7 +1473,27 @@ class AutoFfmpegGui(QMainWindow):
         btn_save.clicked.connect(self.save_profiles)
         btn_reload.clicked.connect(self.reload_profiles)
         self.reload_profiles_text()
+        self.update_profile_summary()
         return w
+
+    def update_profile_summary(self):
+        if not hasattr(self, "lbl_profile_summary"):
+            return
+        preset = self.current_preset()
+        family = preset.get("family", "x264")
+        encoder = preset.get("encoder") or CODECS.get(family, family)
+        intent = {
+            "x264": "compatibility and broad device support",
+            "x265": "high quality and efficient HEVC compression",
+            "x266": "next-generation VVC compression",
+            "av1": "modern web and archival delivery",
+            "ffv1": "lossless archival video",
+            "prores": "editing mezzanine media",
+        }.get(family, "general-purpose conversion")
+        self.lbl_profile_summary.setText(
+            f"Active profile: {self.get_text(self.cmb_preset)}\n"
+            f"Encoder: {encoder}    Goal: {intent}\n"
+            "Use Encoder options only when you need to override the profile.")
 
     # ------------------------------------------------------------------ #
     # Logging
@@ -1060,7 +1639,7 @@ class AutoFfmpegGui(QMainWindow):
 
     def current_preset(self):
         name = self.get_text(self.cmb_preset)
-        return self.preset_sources.get(name, {"family": "x264"})
+        return getattr(self, "preset_sources", {}).get(name, {"family": "x264"})
 
     def reload_profiles_text(self):
         profile_file = os.path.join(APP_DIR, "profile.txt")
@@ -1104,6 +1683,34 @@ class AutoFfmpegGui(QMainWindow):
         else:
             widget.setText(str(value))
 
+    def on_output_base_changed(self, value):
+        self.auto_output = False
+        self.output_base = value.strip()
+        self.outputfile = (self.output_base + "." + self.container
+                           if self.output_base else "")
+        self.schedule_command_refresh()
+
+    def on_container_changed(self):
+        self.container = self.cmb_container.currentData() or "mp4"
+        if self.output_base:
+            self.outputfile = self.output_base + "." + self.container
+        self.schedule_command_refresh()
+
+    def set_output_base(self, path):
+        """Set a base path, accepting a recognized extension for convenience."""
+        path = str(path or "").strip()
+        suffix = Path(path).suffix.lower().lstrip(".")
+        if suffix in {"mp4", "mkv", "mov", "avi"}:
+            idx = self.cmb_container.findData(suffix)
+            if idx >= 0:
+                self.cmb_container.setCurrentIndex(idx)
+            path = str(Path(path).with_suffix(""))
+        self.output_base = path
+        self.outputfile = (path + "." + self.container if path else "")
+        self.inp_output.setText(path)
+        self.auto_output = False
+        self.schedule_command_refresh()
+
     def get_int(self, widget, default=0):
         if isinstance(widget, QComboBox):
             try:
@@ -1135,6 +1742,15 @@ class AutoFfmpegGui(QMainWindow):
         codec = QComboBox()
         codec.addItems(AUDIO_CODECS)
         codec.setToolTip("Encoding for this audio track")
+        encoder = QComboBox()
+        encoder.addItems(AUDIO_ENCODERS)
+        encoder.setToolTip("FFmpeg or an external audio encoder")
+        encoder.setFixedWidth(78)
+        encoder_options = QLineEdit()
+        encoder_options.setPlaceholderText("extra args")
+        encoder_options.setToolTip(
+            "Optional external encoder arguments, for example --quality 5")
+        encoder_options.setFixedWidth(112)
         bitrate = QComboBox()
         bitrate.setEditable(True)
         bitrate.addItems(AUDIO_BITRATES)
@@ -1154,6 +1770,8 @@ class AutoFfmpegGui(QMainWindow):
         layout.addWidget(check)
         layout.addWidget(text, 1)
         layout.addWidget(codec)
+        layout.addWidget(encoder)
+        layout.addWidget(encoder_options)
         layout.addWidget(bitrate)
         layout.addWidget(channels)
         layout.addWidget(sampling)
@@ -1163,6 +1781,8 @@ class AutoFfmpegGui(QMainWindow):
             "input_index": stream_index,
             "check": check,
             "codec": codec,
+            "encoder": encoder,
+            "encoder_options": encoder_options,
             "bitrate": bitrate,
             "channels": channels,
             "sampling": sampling,
@@ -1178,8 +1798,24 @@ class AutoFfmpegGui(QMainWindow):
             lambda *_: self.schedule_command_refresh())
         sampling.currentTextChanged.connect(
             lambda *_: self.schedule_command_refresh())
+        encoder.currentIndexChanged.connect(
+            lambda *_: self.on_audio_encoder_changed(
+                codec, encoder, bitrate, channels, sampling))
+        encoder_options.textChanged.connect(
+            lambda *_: self.schedule_command_refresh())
         check.toggled.connect(lambda *_: self.schedule_command_refresh())
         self._update_audio_row_enabled(codec, bitrate, channels, sampling)
+
+    def on_audio_encoder_changed(self, codec, encoder, bitrate, channels,
+                                 sampling):
+        forced = {"LAME": "MP3", "FAAC": "AAC",
+                  "oggenc": "OGG (Vorbis)"}.get(encoder.currentText())
+        if forced:
+            idx = codec.findText(forced)
+            if idx >= 0:
+                codec.setCurrentIndex(idx)
+        self._update_audio_row_enabled(codec, bitrate, channels, sampling)
+        self.schedule_command_refresh()
 
     def add_subtitle_row(self, stream_index, label):
         item = QListWidgetItem(self.subtitle_list)
@@ -1230,11 +1866,22 @@ class AutoFfmpegGui(QMainWindow):
         self.subtitle_tracks = []
         self.probe = ProbeInfo()
         if not os.path.exists(self.inputfile):
-            return False
+            if not self.bluray_enabled or not os.path.exists(
+                    self.get_text(self.inp_bluray_path)):
+                return False
+        probe_input = [self.inputfile]
+        if self.bluray_enabled:
+            av = BlurayOptions(
+                enabled=True,
+                path=self.get_text(self.inp_bluray_path),
+                playlist=self.spin_bluray_playlist.value(),
+                angle=self.spin_bluray_angle.value(),
+                chapter=self.spin_bluray_chapter.value())
+            probe_input = bluray_input_options(av) + [bluray_url(av)]
         try:
             p = subprocess.run(
                 [self.binaries.ffprobe, "-v", "quiet", "-print_format", "json",
-                 "-show_format", "-show_streams", self.inputfile],
+                 "-show_format", "-show_streams"] + probe_input,
                 capture_output=True, text=True, errors="replace", timeout=60)
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             self.log(f"[error] ffprobe failed: {e}")
@@ -1249,11 +1896,7 @@ class AutoFfmpegGui(QMainWindow):
             self.log("[error] could not parse ffprobe output")
             return False
 
-        fmt = data.get("format", {})
-        try:
-            self.probe.duration = float(fmt.get("duration", 0) or 0)
-        except ValueError:
-            self.probe.duration = 0.0
+        self.probe.duration = probe_duration(data)
 
         self.audio_list.clear()
         self.subtitle_list.clear()
@@ -1468,8 +2111,11 @@ class AutoFfmpegGui(QMainWindow):
             wd.setEnabled(enabled)
 
     def on_preset_changed(self):
+        if hasattr(self, "tbl_encoder_options") and self._encoder_profile_name:
+            self.encoder_profile_overrides[self._encoder_profile_name] = \
+                self.encoder_options_from_table()
         family = self.current_preset().get("family", "x264")
-        if family in ("x264", "x265"):
+        if family in ("x264", "x265", "x266"):
             lo, hi, label = 0, 51, "Quality:"
             tooltip = "CRF quality; lower values mean higher quality"
         elif family in ("vp9", "av1"):
@@ -1485,6 +2131,12 @@ class AutoFfmpegGui(QMainWindow):
         if family == "copy":
             self.cmb_mode.setCurrentIndex(
                 self.cmb_mode.findText("Copy video"))
+        if hasattr(self, "cmb_encoder_family") and \
+                family in ("x264", "x265", "x266", "av1"):
+            self._encoder_profile_name = self.get_text(self.cmb_preset)
+            self.cmb_encoder_family.setCurrentText(family)
+            self.load_encoder_catalog()
+        self.update_profile_summary()
 
     def on_quality_changed(self):
         self.spin_quality.setValue(self.sld_quality.value())
@@ -1528,6 +2180,8 @@ class AutoFfmpegGui(QMainWindow):
         self.btn_save.setEnabled(not enabled)
         if enabled:
             self.inp_output.setText("")
+            self.output_base = ""
+            self.outputfile = ""
             self.inp_output.setPlaceholderText(
                 "One file per stream is written next to the input")
             self.lbl_status.setText(
@@ -1542,6 +2196,8 @@ class AutoFfmpegGui(QMainWindow):
         o = EncodeOptions()
         o.inputfile = self.inputfile
         o.outputfile = self.outputfile
+        o.output_base = self.output_base or self.get_text(self.inp_output).strip()
+        o.container = self.container
         o.preset = self.current_preset()
         o.mode = self.get_text(self.cmb_mode)
         o.hw = HW_ACCELS.get(self.get_text(self.cmb_hw))
@@ -1571,7 +2227,10 @@ class AutoFfmpegGui(QMainWindow):
                 codec=r["codec"].currentText(),
                 bitrate=self.get_int(r["bitrate"], 128),
                 channels=r["channels"].currentData() or "original",
-                sampling=r["sampling"].currentText())
+                sampling=r["sampling"].currentText(),
+                encoder=r["encoder"].currentText().lower(),
+                encoder_options={"__raw__": r["encoder_options"].text()}
+                if r["encoder_options"].text().strip() else {})
             for r in self.audio_rows]
         o.subs = [
             SubtitleSelection(
@@ -1586,16 +2245,49 @@ class AutoFfmpegGui(QMainWindow):
         o.nomux = self.chk_nomux.isChecked()
         o.available_encoders = self.available_encoders
         o.dovi_tool = self.binaries.dovi
+        o.encoder_options = self.encoder_options_from_table()
+        o.avisynth = AvisynthOptions(
+            enabled=self.chk_avisynth.isChecked(),
+            script_path=self.get_text(self.inp_avs_path).strip(),
+            script_text=self.txt_avs.toPlainText(),
+            source_filter=self.get_text(self.cmb_avs_source),
+            plugin_paths=[p.strip() for p in
+                          self.get_text(self.inp_avs_plugins).split(";")
+                          if p.strip()],
+            filter_mode=self.cmb_avs_filter_mode.currentData() or "script")
+        o.audio_tools = {
+            "lame": self.binaries.lame,
+            "faac": self.binaries.faac,
+            "oggenc": self.binaries.oggenc,
+        }
+        o.bluray = BlurayOptions(
+            enabled=self.bluray_enabled,
+            path=self.get_text(self.inp_bluray_path).strip(),
+            playlist=self.spin_bluray_playlist.value(),
+            angle=self.spin_bluray_angle.value(),
+            chapter=self.spin_bluray_chapter.value())
         return o
 
-    def prepare_jobs(self, log=None):
+    def prepare_jobs(self, log=None, silent=False):
         options = self.collect_options()
-        had_output = bool(self.outputfile)
+        had_output = bool(options.output_base or options.outputfile)
+        normalize_output(options, self.probe)
+        issues = preflight(options, self.probe, self.available_encoders)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        for issue in issues:
+            prefix = issue.severity.upper()
+            (log or self.log)(f"[preflight:{prefix}] {issue.message}"
+                              + (f" Fix: {issue.fix}" if issue.fix else ""))
+        if errors:
+            if not silent:
+                QMessageBox.warning(
+                    self, "Preflight failed",
+                    "\n".join(issue.message for issue in errors))
+            return options, []
         jobs = build_jobs(options, self.probe, self.binaries,
                           self.available_encoders, log or self.log)
         if not had_output and options.outputfile:
-            self.outputfile = options.outputfile
-            self.inp_output.setText(options.outputfile)
+            self.set_output_base(options.outputfile)
         return options, jobs
 
     # ------------------------------------------------------------------ #
@@ -1604,12 +2296,19 @@ class AutoFfmpegGui(QMainWindow):
     def preview_command(self, jobs=None, silent=False):
         if jobs is None:
             _, jobs = self.prepare_jobs(
-                log=(lambda m: None) if silent else None)
+                log=(lambda m: None) if silent else None, silent=silent)
         if not jobs:
             self.txt_cmd.setPlainText("")
             self.lbl_cmd_info.setText("")
             return
-        self.txt_cmd.setPlainText("\n".join(" ".join(j.cmd) for j in jobs))
+        lines = []
+        for job in jobs:
+            if job.pipeline:
+                lines.append("\n  | ".join(" ".join(part)
+                                              for part in job.pipeline))
+            else:
+                lines.append(" ".join(job.cmd))
+        self.txt_cmd.setPlainText("\n".join(lines))
         self.lbl_cmd_info.setText(
             f"{len(jobs)} command(s)" if len(jobs) > 1 else "")
 
@@ -1621,7 +2320,11 @@ class AutoFfmpegGui(QMainWindow):
         if self.thread and self.thread.isRunning():
             return
         for j in jobs:
-            self.log("[cmd] " + " ".join(j.cmd))
+            if j.pipeline:
+                self.log("[pipeline] " + " | ".join(" ".join(part)
+                                                      for part in j.pipeline))
+            else:
+                self.log("[cmd] " + " ".join(j.cmd))
         self.thread = EncodeThread(jobs, self)
         self.thread.log_line.connect(self.append_log)
         self.thread.progress.connect(self.on_progress)
@@ -1704,6 +2407,39 @@ class AutoFfmpegGui(QMainWindow):
     def remove_queue_item(self):
         for item in self.list_queue.selectedItems():
             self.list_queue.takeItem(self.list_queue.row(item))
+
+    def move_queue_item(self, direction):
+        row = self.list_queue.currentRow()
+        target = row + direction
+        if row < 0 or target < 0 or target >= self.list_queue.count():
+            return
+        item = self.list_queue.takeItem(row)
+        self.list_queue.insertItem(target, item)
+        self.list_queue.setCurrentRow(target)
+
+    def duplicate_queue_item(self):
+        item = self.list_queue.currentItem()
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data:
+            clone = self.queue_item(job_from_dict(data))
+            self.list_queue.insertItem(self.list_queue.row(item) + 1, clone)
+            self.list_queue.setCurrentItem(clone)
+
+    def inspect_queue_item(self):
+        item = self.list_queue.currentItem()
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        job = job_from_dict(data)
+        if job.pipeline:
+            text = "\n  | ".join(" ".join(part) for part in job.pipeline)
+        else:
+            text = " ".join(job.cmd)
+        self.txt_cmd.setPlainText(text)
 
     def save_queue(self):
         jobs = []
@@ -1998,6 +2734,23 @@ class AutoFfmpegGui(QMainWindow):
     # ------------------------------------------------------------------ #
     # Bitrate calculator
     # ------------------------------------------------------------------ #
+    def effective_video_duration(self, options):
+        duration = self.probe.duration
+        if not (options.avisynth.enabled or
+                Path(options.inputfile).suffix.lower() == ".avs"):
+            return duration
+        try:
+            plan = build_input_plan(options, self.probe)
+            script = plan.inputs[plan.video_index]
+            if Path(script).suffix.lower() != ".avs":
+                return duration
+            measured = quick_duration(self.binaries.ffprobe, script)
+            if measured > 0:
+                return measured
+        except (OSError, ValueError, IndexError):
+            pass
+        return duration
+
     def calc_bitrate(self):
         if not self.probe.duration:
             QMessageBox.information(self, "AutoFFmpegGui",
@@ -2009,9 +2762,11 @@ class AutoFfmpegGui(QMainWindow):
                     if r["codec"].currentText() != "Copy")
         if not checked:
             audio = 128
-        video_kbps = calc_bitrate_mb(mb, self.probe.duration, audio)
+        options = self.collect_options()
+        duration = self.effective_video_duration(options)
+        video_kbps = calc_bitrate_mb(mb, duration, audio)
         self.inp_bitrate.setText(str(video_kbps))
-        self.log(f"[calc] target {mb} MB over {self.probe.duration:.0f}s "
+        self.log(f"[calc] target {mb} MB over {duration:.2f}s "
                  f"-> video bitrate {video_kbps} kbit/s")
 
     # ------------------------------------------------------------------ #
@@ -2037,7 +2792,14 @@ class AutoFfmpegGui(QMainWindow):
         args = []
         if vf:
             args += ["-vf", ",".join(vf)]
-        args += ["-autoexit", "-i", self.inputfile]
+        if o.avisynth.enabled or Path(self.inputfile).suffix.lower() == ".avs":
+            plan = build_input_plan(o, self.probe)
+            source = plan.inputs[plan.video_index]
+            if Path(source).suffix.lower() == ".avs":
+                args += ["-f", "avisynth"]
+            args += ["-autoexit", "-i", source]
+        else:
+            args += ["-autoexit", "-i", self.inputfile]
         self.run_ffplay(args)
 
     def screenshots(self):
@@ -2074,7 +2836,7 @@ class AutoFfmpegGui(QMainWindow):
     def openinputfile(self):
         filters = ("Media (*.mp4 *.mkv *.avi *.mov *.ts *.mts *.m2ts *.vob "
                    "*.mpg *.mpeg *.wmv *.flv *.webm *.ogm *.m2v *.m2t *.vro "
-                   "*.d2v *.dga *.avs *.grf *.mka *.mp3 *.flac *.wav *.aac);;"
+                   "*.d2v *.dga *.avs *.grf *.mka *.mp3 *.flac *.wav *.aac *.iso);;"
                    "All files (*.*)")
         f, _ = QFileDialog.getOpenFileName(self, "Open File to Encode",
                                            self.lastdir, filters)
@@ -2085,8 +2847,16 @@ class AutoFfmpegGui(QMainWindow):
         self.lastdir = os.path.dirname(f)
         self.inp_input.setText(f)
         self.inputfile = f
+        self.bluray_enabled = False
+        self.inp_bluray_path.clear()
+        if Path(f).suffix.lower() == ".avs":
+            self.set_advanced_mode(True)
+            self.chk_avisynth.setChecked(True)
+            self.inp_avs_path.setText(f)
+            self.load_avs_script()
         if self.auto_output:
             self.inp_output.setText("")
+            self.output_base = ""
             self.outputfile = ""
         self.analyze()
         self.silentscale()
@@ -2094,17 +2864,14 @@ class AutoFfmpegGui(QMainWindow):
     def savefile(self):
         if self.inputfile:
             default = os.path.join(os.path.dirname(self.inputfile),
-                                   Path(self.inputfile).stem + "_autoff.mkv")
+                                   Path(self.inputfile).stem + "_autoff")
         else:
-            default = os.path.join(self.lastdir or "", "output.mkv")
+            default = os.path.join(self.lastdir or "", "output")
         f, _ = QFileDialog.getSaveFileName(
             self, "Save output file", default,
-            "MP4 (*.mp4);;MKV (*.mkv);;AVI (*.avi);;MPEG (*.mpg);;"
-            "WMV (*.wmv);;Matroska Audio (*.mka);;All files (*.*)")
+            "Output base name (*);;All files (*.*)")
         if f:
-            self.inp_output.setText(f)
-            self.outputfile = f
-            self.auto_output = False
+            self.set_output_base(f)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -2117,7 +2884,11 @@ class AutoFfmpegGui(QMainWindow):
             if not path:
                 continue
             if os.path.isdir(path):
-                self.add_folder_from_path(path)
+                if is_bluray_path(path):
+                    self.set_bluray_source(path)
+                    self.analyze()
+                else:
+                    self.add_folder_from_path(path)
             elif os.path.isfile(path):
                 self.load_file(path)
                 break
@@ -2230,6 +3001,8 @@ class AutoFfmpegGui(QMainWindow):
         restore_combo(self.cmb_hdr, "hdr")
         restore_combo(self.cmb_framerate, "framerate")
         restore_combo(self.cmb_after, "after")
+        restore_combo(self.cmb_container, "container")
+        self.container = self.cmb_container.currentData() or "mp4"
         if s.contains("quality"):
             self.sld_quality.setValue(int(s.value("quality")))
         if s.contains("bitrate"):
@@ -2263,6 +3036,32 @@ class AutoFfmpegGui(QMainWindow):
         if s.contains("metadata"):
             self.chk_metadata.setChecked(
                 s.value("metadata", False, type=bool))
+        if s.contains("avisynth_enabled"):
+            self.chk_avisynth.setChecked(
+                s.value("avisynth_enabled", False, type=bool))
+        if s.contains("avisynth_source"):
+            self.set_text(self.cmb_avs_source, s.value("avisynth_source"))
+        if s.contains("avisynth_filter_mode"):
+            value = str(s.value("avisynth_filter_mode"))
+            idx = self.cmb_avs_filter_mode.findData(value)
+            if idx >= 0:
+                self.cmb_avs_filter_mode.setCurrentIndex(idx)
+        if s.contains("avisynth_path"):
+            self.inp_avs_path.setText(str(s.value("avisynth_path")))
+        if s.contains("avisynth_plugins"):
+            self.inp_avs_plugins.setText(str(s.value("avisynth_plugins")))
+        if s.contains("avisynth_script") and not self.inp_avs_path.text():
+            self.txt_avs.setPlainText(str(s.value("avisynth_script")))
+        if s.contains("encoder_profile_overrides"):
+            try:
+                data = json.loads(str(s.value("encoder_profile_overrides")))
+                if isinstance(data, dict):
+                    self.encoder_profile_overrides = {
+                        str(name): {str(k): str(v) for k, v in values.items()}
+                        for name, values in data.items()
+                        if isinstance(values, dict)}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self.log("[warning] invalid saved encoder profile overrides")
         self.on_preset_changed()
         self.on_mode_changed()
         self.on_hdr_changed()
@@ -2290,6 +3089,7 @@ class AutoFfmpegGui(QMainWindow):
         s.setValue("hw", self.get_text(self.cmb_hw))
         s.setValue("hdr", self.get_text(self.cmb_hdr))
         s.setValue("after", self.get_text(self.cmb_after))
+        s.setValue("container", self.get_text(self.cmb_container))
         s.setValue("quality", self.sld_quality.value())
         s.setValue("bitrate", self.get_text(self.inp_bitrate))
         s.setValue("cds", self.get_text(self.inp_cds))
@@ -2306,5 +3106,17 @@ class AutoFfmpegGui(QMainWindow):
         s.setValue("deinterlace", self.chk_deinterlace.isChecked())
         s.setValue("chapters", self.chk_chapters.isChecked())
         s.setValue("metadata", self.chk_metadata.isChecked())
+        s.setValue("avisynth_enabled", self.chk_avisynth.isChecked())
+        s.setValue("avisynth_source", self.get_text(self.cmb_avs_source))
+        s.setValue("avisynth_filter_mode",
+                   self.cmb_avs_filter_mode.currentData() or "script")
+        s.setValue("avisynth_path", self.get_text(self.inp_avs_path))
+        s.setValue("avisynth_plugins", self.get_text(self.inp_avs_plugins))
+        s.setValue("avisynth_script", self.txt_avs.toPlainText())
+        if self._encoder_profile_name:
+            self.encoder_profile_overrides[self._encoder_profile_name] = \
+                self.encoder_options_from_table()
+        s.setValue("encoder_profile_overrides",
+                   json.dumps(self.encoder_profile_overrides, sort_keys=True))
         self.save_queue()
         super().closeEvent(e)

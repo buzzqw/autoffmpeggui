@@ -16,18 +16,20 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .config import (
     CODECS,
     DEFAULT_CL,
     DEFAULT_MASTER,
+    ENCODER_OPTION_CATALOG,
     HW_ACCELS,
     HW_ENCODERS,
     HW_INIT,
     HW_QUALITY_OPT,
     detect_vaapi_device,
 )
+from .bluray import BlurayOptions, bluray_input_options, bluray_url
 
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text",
                    "subtitle", "text", "eia_608", "microdvd", "sami"}
@@ -47,6 +49,7 @@ VIDEO_RAW_FORMATS = {
     "prores": ("mov", ".mov"),
     "dnxhd": ("mxf", ".mxf"),
     "ffv1": ("matroska", ".mkv"),
+    "x266": ("matroska", ".mkv"),
 }
 AUDIO_RAW_FORMATS = {
     "AAC": ("adts", ".aac"),
@@ -103,6 +106,9 @@ class EncodeJob:
     measures: List[Measure] = field(default_factory=list)
     cleanup: List[str] = field(default_factory=list)
     is_video: bool = True
+    # Optional argv-only pipeline for external tools.  Each item is an argv
+    # list; workers connect stdout to stdin without invoking a shell.
+    pipeline: List[List[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +133,8 @@ class AudioSelection:
     bitrate: int = 128
     channels: str = "original"
     sampling: str = "auto"
+    encoder: str = "ffmpeg"
+    encoder_options: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -137,9 +145,78 @@ class SubtitleSelection:
 
 
 @dataclass
+class AvisynthOptions:
+    """Configuration for an AviSynth+ video source/processing script."""
+    enabled: bool = False
+    script_path: str = ""
+    script_text: str = ""
+    source_filter: str = "FFVideoSource"
+    plugin_paths: List[str] = field(default_factory=list)
+    # script: AviSynth owns resize/crop/deinterlace; ffmpeg: keep current GUI
+    # filters; both: apply both deliberately.
+    filter_mode: str = "script"
+    keep_generated_script: bool = True
+
+
+@dataclass
+class InputPlan:
+    """Input indices used by generated FFmpeg commands."""
+    inputs: List[str] = field(default_factory=list)
+    video_index: int = 0
+    audio_index: int = 0
+    subtitle_index: int = 0
+    generated_script: str = ""
+    input_options: Dict[int, List[str]] = field(default_factory=dict)
+
+
+def source_path(options: "EncodeOptions") -> str:
+    return bluray_url(options.bluray) if options.bluray.enabled else options.inputfile
+
+
+def source_exists(options: "EncodeOptions") -> bool:
+    if options.bluray.enabled:
+        return bool(options.bluray.path and os.path.exists(options.bluray.path))
+    return bool(options.inputfile and os.path.exists(options.inputfile))
+
+
+def _parse_rate(value) -> float:
+    try:
+        if isinstance(value, str) and "/" in value:
+            num, den = value.split("/", 1)
+            return float(num) / float(den) if float(den) else 0.0
+        return float(value or 0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def probe_duration(data: dict) -> float:
+    """Return a useful duration even when ffprobe reports ``N/A``."""
+    fmt = data.get("format", {}) or {}
+    try:
+        duration = float(fmt.get("duration", 0) or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration > 0:
+        return duration
+    for stream in data.get("streams", []):
+        try:
+            frames = float(stream.get("nb_frames", 0) or 0)
+        except (TypeError, ValueError):
+            frames = 0.0
+        rate = _parse_rate(stream.get("avg_frame_rate") or
+                           stream.get("r_frame_rate"))
+        if frames > 0 and rate > 0:
+            return frames / rate
+    return 0.0
+
+
+@dataclass
 class EncodeOptions:
     inputfile: str = ""
     outputfile: str = ""
+    # UI-facing output selection. outputfile remains the resolved final path.
+    output_base: str = ""
+    container: str = ""
     preset: dict = field(default_factory=lambda: {"family": "x264"})
     mode: str = "Quality (CRF)"
     hw: Optional[str] = None
@@ -172,6 +249,13 @@ class EncodeOptions:
     nomux: bool = False
     available_encoders: set = field(default_factory=set)
     dovi_tool: Optional[str] = None
+    avisynth: AvisynthOptions = field(default_factory=AvisynthOptions)
+    # Overrides are FFmpeg output options (without the leading dash), e.g.
+    # {"aq-mode": "3", "psy-rd": "2.0"}. Empty values represent flags.
+    encoder_options: Dict[str, str] = field(default_factory=dict)
+    video_encoder: str = ""
+    audio_tools: Dict[str, str] = field(default_factory=dict)
+    bluray: BlurayOptions = field(default_factory=BlurayOptions)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +265,8 @@ class EncodeOptions:
 
 def detect_family(args):
     a = (args or "").lower()
+    if "x266" in a or "libvvenc" in a or "libx266" in a or "vvc" in a:
+        return "x266"
     if "libsvtav1" in a or "libaom" in a or "av1" in a:
         return "av1"
     if "libvpx-vp9" in a or "vp9" in a:
@@ -257,13 +343,48 @@ def effective_family(options: EncodeOptions, probe: ProbeInfo) -> str:
 
 
 def family_supports_quality(family):
-    return family in ("x264", "x265", "vp9", "av1", "mpeg4", "xvid",
+    return family in ("x264", "x265", "x266", "vp9", "av1", "mpeg4", "xvid",
                       "mpeg2", "wmv")
 
 
 def family_supports_bitrate(family):
-    return family in ("x264", "x265", "vp9", "av1", "mpeg4", "xvid",
+    return family in ("x264", "x265", "x266", "vp9", "av1", "mpeg4", "xvid",
                       "mpeg2", "wmv")
+
+
+def encoder_option_catalog(family: str) -> Dict[str, str]:
+    """Return a copy of the profile editor catalog for an encoder family."""
+    return dict(ENCODER_OPTION_CATALOG.get(family, {}))
+
+
+def _encoder_override_args(args: List[str], options: Dict[str, str]) -> List[str]:
+    """Apply profile overrides once, replacing generated duplicate options."""
+    out = list(args)
+    for key, value in (options or {}).items():
+        flag = str(key).strip()
+        if not flag:
+            continue
+        if not flag.startswith("-"):
+            flag = "-" + flag
+        # Remove the previous flag and its value. FFmpeg options represented
+        # as flags (empty/true) are also supported.
+        cleaned = []
+        i = 0
+        while i < len(out):
+            if out[i] == flag:
+                i += 1
+                if i < len(out) and (not out[i].startswith("-") or
+                                     re.match(r"-\d", out[i])):
+                    i += 1
+                continue
+            cleaned.append(out[i])
+            i += 1
+        out = cleaned
+        value = "" if value is None else str(value).strip()
+        out.append(flag)
+        if value and value.lower() not in ("true", "yes"):
+            out.append(value)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +401,9 @@ def escape_filter_arg(path):
 
 
 def build_filter_args(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
+    if (options.avisynth.enabled and options.avisynth.filter_mode == "script") or \
+            Path(options.inputfile).suffix.lower() == ".avs":
+        return []
     if not options.resize and not options.deinterlace:
         return []
     vf = []
@@ -296,6 +420,112 @@ def build_filter_args(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
     if options.deinterlace:
         vf.append("yadif")
     return vf
+
+
+def _avs_quote(path: str) -> str:
+    """Quote a Windows/POSIX path for an AviSynth string literal."""
+    return (path or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _avisynth_filter_lines(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
+    """Translate the safe GUI resize/deinterlace controls to AviSynth calls."""
+    if not options.resize and not options.deinterlace:
+        return []
+    lines = []
+    l, r, t, b = options.crop_l, options.crop_r, options.crop_t, options.crop_b
+    if options.resize and (l or r or t or b):
+        cw = max(2, probe.vwidth - l - r)
+        ch = max(2, probe.vheight - t - b)
+        lines.append(f"src = src.Crop({l}, {t}, {cw}, {ch})")
+    if options.resize and options.width and options.height and \
+            (options.width != probe.vwidth or options.height != probe.vheight):
+        lines.append(f"src = src.Spline36Resize({options.width}, {options.height})")
+    if options.deinterlace:
+        lines.append('src = src.QTGMC(preset="Fast")')
+    return lines
+
+
+def build_avisynth_script(options: EncodeOptions, probe: ProbeInfo) -> str:
+    """Return a complete or templated AviSynth+ script for this encode."""
+    av = options.avisynth
+    template = av.script_text.strip()
+    if not template:
+        template = (
+            '# AutoFFmpegGui AviSynth+ script\n'
+            '# Edit this script to add any AviSynth filter or plugin.\n'
+            '{{PLUGIN_LOADS}}\n'
+            'src = {{SOURCE_FILTER}}("{{INPUT}}")\n'
+            '{{VIDEO_FILTERS}}\n'
+            'src\n')
+    loads = "\n".join(
+        f'LoadPlugin("{_avs_quote(p)}")' for p in av.plugin_paths if p)
+    filters = ("\n".join(_avisynth_filter_lines(options, probe))
+               if av.filter_mode in ("script", "both") else "")
+    return (template.replace("{{PLUGIN_LOADS}}", loads)
+            .replace("{{SOURCE_FILTER}}", av.source_filter or "FFVideoSource")
+            .replace("{{INPUT}}", _avs_quote(source_path(options)))
+            .replace("{{VIDEO_FILTERS}}", filters))
+
+
+def avisynth_active(options: EncodeOptions) -> bool:
+    return bool(options.avisynth.enabled or
+                Path(options.inputfile).suffix.lower() == ".avs")
+
+
+def build_input_plan(options: EncodeOptions, probe: ProbeInfo) -> InputPlan:
+    """Materialize an AviSynth script and describe FFmpeg stream indices."""
+    input_path = source_path(options)
+    source_opts = ({0: bluray_input_options(options.bluray)}
+                   if options.bluray.enabled else {})
+    if not avisynth_active(options):
+        return InputPlan(inputs=[input_path], input_options=source_opts)
+
+    av = options.avisynth
+    script_path = av.script_path.strip()
+    if not script_path and Path(options.inputfile).suffix.lower() == ".avs":
+        script_path = options.inputfile
+    if script_path:
+        if script_path != options.inputfile and \
+                Path(options.inputfile).suffix.lower() != ".avs":
+            # A script selected for a normal media file usually exposes video
+            # only. Keep the original input for audio and subtitles.
+            return InputPlan(inputs=[input_path, script_path],
+                             video_index=1, audio_index=0, subtitle_index=0,
+                             input_options=source_opts)
+        # A standalone script is the only reliable source for both streams.
+        return InputPlan(inputs=[script_path], video_index=0, audio_index=0,
+                         subtitle_index=0)
+
+    script = build_avisynth_script(options, probe)
+    if options.outputfile:
+        script_path = str(Path(options.outputfile).with_suffix(".avs"))
+    else:
+        script_path = str(Path(options.inputfile).with_suffix(".autoffmpeg.avs"))
+    try:
+        Path(script_path).write_text(script, encoding="utf-8")
+    except OSError:
+        # The eventual FFmpeg error is more useful than silently using an
+        # incomplete source. Keep the path in the command for diagnostics.
+        pass
+    return InputPlan(inputs=[input_path, script_path], video_index=1,
+                     audio_index=0, subtitle_index=0,
+                     generated_script=script_path, input_options=source_opts)
+
+
+def input_args(plan: InputPlan) -> List[str]:
+    args = []
+    for index, path in enumerate(plan.inputs):
+        args += list(plan.input_options.get(index, []))
+        if Path(path).suffix.lower() == ".avs":
+            args += ["-f", "avisynth"]
+        args += ["-i", path]
+    return args
+
+
+def stream_ref(plan: InputPlan, kind: str, index: str = "0") -> str:
+    source = {"v": plan.video_index, "a": plan.audio_index,
+              "s": plan.subtitle_index}[kind]
+    return f"{source}:{kind}:{index}"
 
 
 def build_burn_filter(options: EncodeOptions, probe: ProbeInfo):
@@ -325,8 +555,11 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
     quality = options.quality
     bitrate = options.bitrate
 
+    def finish(args):
+        return _encoder_override_args(args, options.encoder_options)
+
     if mode == "Copy video" or mode == "Remux (copy all)" or family == "copy":
-        return ["-c:v", "copy"]
+        return finish(["-c:v", "copy"])
 
     if hw:
         enc = HW_ENCODERS.get((family, hw))
@@ -336,7 +569,7 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
                 args += [HW_QUALITY_OPT[hw], str(quality)]
             else:
                 args += ["-b:v", f"{bitrate}k"]
-            return args
+            return finish(args)
         if enc:
             log(f"[info] {enc} not available: falling back to software "
                 f"{CODECS.get(family, 'encoder')}")
@@ -351,6 +584,8 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
                     args += ["-crf", str(quality)]
                 if family == "vp9" and "-b:v" not in args:
                     args += ["-b:v", "0"]
+            elif family == "x266" and "-qp" not in args:
+                args += ["-qp", str(quality)]
             elif family in ("mpeg4", "xvid", "mpeg2", "wmv") and \
                     "-qscale:v" not in args:
                 args += ["-qscale:v", str(quality)]
@@ -360,35 +595,39 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
             args += ["-b:v", f"{bitrate}k"]
             if mode == "2-pass bitrate" and family != "av1":
                 args += ["-pass", str(passno)]
-        return args
+        return finish(args)
 
     if mode == "Quality (CRF)":
+        encoder = options.video_encoder or preset.get("encoder") or CODECS[family]
         if family in ("x264", "x265"):
-            return ["-c:v", CODECS[family],
+            return finish(["-c:v", encoder,
                     "-preset", preset.get("xpreset", "medium"),
-                    "-crf", str(quality)]
+                    "-crf", str(quality)])
+        if family == "x266":
+            return finish(["-c:v", encoder, "-qp", str(quality)])
         if family == "av1":
-            return ["-c:v", CODECS[family], "-crf", str(quality)]
+            return finish(["-c:v", encoder, "-crf", str(quality)])
         if family == "vp9":
             # libvpx-vp9 needs an explicit zero bitrate to enable CRF mode.
-            return ["-c:v", CODECS[family], "-crf", str(quality),
-                    "-b:v", "0"]
-        return ["-c:v", CODECS[family], "-qscale:v", str(quality)]
+            return finish(["-c:v", encoder, "-crf", str(quality),
+                           "-b:v", "0"])
+        return finish(["-c:v", CODECS[family], "-qscale:v", str(quality)])
 
     if mode in ("1-pass bitrate", "2-pass bitrate"):
+        encoder = options.video_encoder or preset.get("encoder") or CODECS[family]
         if family in ("x264", "x265"):
-            args = ["-c:v", CODECS[family],
+            args = ["-c:v", encoder,
                     "-preset", preset.get("xpreset", "medium"),
                     "-b:v", f"{bitrate}k"]
             maxr = int(bitrate * 1.25)
             args += ["-maxrate", f"{maxr}k", "-bufsize", f"{maxr * 2}k"]
         else:
-            args = ["-c:v", CODECS[family], "-b:v", f"{bitrate}k"]
+            args = ["-c:v", encoder, "-b:v", f"{bitrate}k"]
         if mode == "2-pass bitrate" and family != "av1":
             # SVT-AV1 has no 2-pass mode.
             args += ["-pass", str(passno)]
-        return args
-    return ["-c:v", "copy"]
+        return finish(args)
+    return finish(["-c:v", "copy"])
 
 
 # --------------------------------------------------------------------------- #
@@ -397,6 +636,88 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
 
 AUDIO_ENCODER = {"AAC": "aac", "MP3": "libmp3lame", "FLAC": "flac",
                  "OGG (Vorbis)": "libvorbis", "AC-3": "ac3", "Copy": "copy"}
+EXTERNAL_AUDIO_ENCODERS = {"lame": ("MP3", ".mp3"),
+                           "faac": ("AAC", ".aac"),
+                           "oggenc": ("OGG (Vorbis)", ".ogg")}
+
+
+def _external_audio_args(row: AudioSelection, output: str) -> List[str]:
+    """Build an argv-only command for LAME, FAAC or oggenc."""
+    tool = row.encoder.lower()
+    opts = row.encoder_options or {}
+    raw = opts.get("__raw__", "")
+    if raw:
+        import shlex
+        extra = shlex.split(raw, posix=os.name != "nt")
+    else:
+        extra = []
+    bitrate = str(row.bitrate)
+    if tool == "lame":
+        return ["lame", "-b", bitrate] + extra + ["-", output]
+    if tool == "faac":
+        return ["faac", "-b", bitrate, "-o", output] + extra + ["-"]
+    if tool == "oggenc":
+        return ["oggenc", "-b", bitrate, "-o", output] + extra + ["-"]
+    return []
+
+
+def build_external_audio_jobs(options: EncodeOptions, probe: ProbeInfo,
+                              input_plan: InputPlan, binaries=None,
+                              output_dir: Optional[str] = None,
+                              cleanup_outputs: bool = False):
+    """Build external audio encoder jobs and return ``(jobs, files)``.
+
+    ``files`` contains ``(output_audio_index, path)`` entries for the final
+    mux. WAV is streamed through an argv-only subprocess pipeline, avoiding
+    temporary PCM files and shell quoting problems.
+    """
+    ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
+    selected = [r for r in options.audio if r.enabled]
+    base_dir = output_dir or os.path.dirname(options.inputfile)
+    stem = Path(options.outputfile or options.inputfile).stem
+    jobs = []
+    files = []
+    for output_index, row in enumerate(selected):
+        tool = (row.encoder or "ffmpeg").lower()
+        if tool == "ffmpeg":
+            continue
+        fmt_ext = EXTERNAL_AUDIO_ENCODERS.get(tool)
+        if not fmt_ext:
+            continue
+        codec, ext = fmt_ext
+        out = os.path.join(base_dir, f"{stem}.autoffmpeg_audio{output_index}{ext}")
+        external = _external_audio_args(row, out)
+        if not external:
+            continue
+        tool_path = options.audio_tools.get(row.encoder,
+                                            options.audio_tools.get(tool, tool))
+        external[0] = tool_path
+        extract = [ffmpeg, "-hide_banner"] + input_args(input_plan)
+        if options.trim_start:
+            extract += ["-ss", options.trim_start]
+        if options.trim_end:
+            extract += ["-to", options.trim_end]
+        extract += ["-map", f"{input_plan.audio_index}:a:{row.input_index}",
+                    "-vn", "-sn"]
+        if row.channels in ("1", "2", "6", "8"):
+            extract += ["-ac", row.channels]
+        elif tool == "lame" and row.input_index < len(probe.audio_tracks):
+            source_channels = probe.audio_tracks[row.input_index].get("channels", 0)
+            try:
+                if int(source_channels or 0) > 2:
+                    extract += ["-ac", "2"]
+            except (TypeError, ValueError):
+                pass
+        if row.sampling != "auto":
+            extract += ["-ar", row.sampling]
+        extract += ["-f", "wav", "-"]
+        jobs.append(EncodeJob(
+            f"Audio {output_index} -> {Path(out).name} ({row.encoder})",
+            external, probe.duration, is_video=False,
+            pipeline=[extract, external],
+            cleanup=[out] if cleanup_outputs else []))
+        files.append((output_index, out))
+    return jobs, files
 
 
 def compute_loudnorm(raw: str) -> dict:
@@ -423,8 +744,9 @@ def compute_loudnorm(raw: str) -> dict:
 
 
 def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
-                     binaries=None) -> (List[str], List[str], List[Measure],
-                                        List[str]):
+                     binaries=None, input_plan: Optional[InputPlan] = None,
+                     external_files=None) -> (
+                         List[str], List[str], List[Measure], List[str]):
     """Return (codec_args, filter_complex, measures, audio_maps).
 
     Audio filters (volume / loudnorm) are emitted through ``-filter_complex``
@@ -436,14 +758,30 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
     filter_complex: List[str] = []
     measures: List[Measure] = []
     audio_maps: List[str] = []
+    plan = input_plan or InputPlan(inputs=[options.inputfile])
     if options.batch:
-        return (["-c:a", "copy"], [], [], ["-map", "0:a?"])
+        return (["-c:a", "copy"], [], [],
+                ["-map", f"{plan.audio_index}:a?"])
     selected = [r for r in options.audio if r.enabled]
     if not selected:
         return (["-an"], [], [], [])
 
+    external_by_output = {
+        output_index: path for output_index, path in (external_files or [])}
+    external_position = {
+        output_index: position
+        for position, (output_index, _path) in enumerate(external_files or [])}
+
     for output_index, row in enumerate(selected):
         codec = row.codec
+        if (row.encoder or "ffmpeg").lower() != "ffmpeg":
+            # External encoders are materialized by build_external_audio_jobs
+            # and muxed as a copied pre-encoded input.
+            if output_index in external_by_output:
+                source_index = len(plan.inputs) + external_position[output_index]
+                audio_maps += ["-map", f"{source_index}:a:0"]
+                codec_args += [f"-c:a:{output_index}", "copy"]
+            continue
         is_copy = codec == "Copy"
         label = f"a{output_index}"
 
@@ -469,18 +807,19 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
                 measure_cmd = [
                     binaries.ffmpeg if binaries else "ffmpeg",
                     "-hide_banner",
-                    "-i", options.inputfile,
-                    "-map", f"0:a:{row.input_index}",
+                ] + input_args(plan) + [
+                    "-map", f"{plan.audio_index}:a:{row.input_index}",
                     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
                     "-f", "null", "-",
                 ]
                 measures.append(Measure(cmd=measure_cmd, tokens=tokens))
 
         if af:
-            filter_complex.append(f"[0:a:{row.input_index}]{af}[{label}]")
+            filter_complex.append(
+                f"[{plan.audio_index}:a:{row.input_index}]{af}[{label}]")
             audio_maps += ["-map", f"[{label}]"]
         else:
-            audio_maps += ["-map", f"0:a:{row.input_index}"]
+            audio_maps += ["-map", f"{plan.audio_index}:a:{row.input_index}"]
 
         codec_args += [f"-c:a:{output_index}", AUDIO_ENCODER[codec]]
         if codec not in ("Copy", "FLAC"):
@@ -500,7 +839,9 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
 
 
 def build_stream_args(options: EncodeOptions, probe: ProbeInfo,
-                      out_is_mp4: bool) -> (List[str], List[str], List[str]):
+                      out_is_mp4: bool,
+                      input_plan: Optional[InputPlan] = None) -> (
+                          List[str], List[str], List[str]):
     """Return (video_maps, sub_maps, sub_args).
 
     Audio mapping is handled by build_audio_plan so that filtered audio tracks
@@ -509,21 +850,22 @@ def build_stream_args(options: EncodeOptions, probe: ProbeInfo,
     video_maps = []
     sub_maps = []
     sub_args = []
+    plan = input_plan or InputPlan(inputs=[options.inputfile])
     if options.batch:
         if probe.has_video:
-            video_maps += ["-map", "0:v:0"]
-        sub_maps += ["-map", "0:s?"]
+            video_maps += ["-map", f"{plan.video_index}:v:0"]
+        sub_maps += ["-map", f"{plan.subtitle_index}:s?"]
         sub_args += ["-c:s", "copy"]
         return video_maps, sub_maps, sub_args
     if probe.has_video:
-        video_maps += ["-map", "0:v:0"]
+        video_maps += ["-map", f"{plan.video_index}:v:0"]
 
     burned = {s.input_index for s in options.subs if s.enabled and s.burn}
     selected_subs = [s for s in options.subs if s.enabled and s.input_index not in burned]
     if selected_subs:
         scodec = "mov_text" if out_is_mp4 else "copy"
         for output_index, row in enumerate(selected_subs):
-            sub_maps += ["-map", f"0:s:{row.input_index}"]
+            sub_maps += ["-map", f"{plan.subtitle_index}:s:{row.input_index}"]
             sub_args += [f"-c:s:{output_index}", scodec]
     elif not burned:
         sub_args += ["-sn"]
@@ -678,26 +1020,54 @@ def plan_dovi(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 
 
 def default_output(options: EncodeOptions, probe: ProbeInfo) -> str:
-    stem = Path(options.inputfile).stem
+    stem = Path(options.bluray.path if options.bluray.enabled else options.inputfile).stem
     family = effective_family(options, probe)
     if options.mode == "Remux (copy all)":
-        ext = ".mkv"
+        container = "mkv"
     elif options.mode == "Audio only":
-        ext = ".mka"
+        container = "mka"
+    elif options.container:
+        container = options.container.lower().lstrip(".")
     elif family in ("x264", "x265"):
-        ext = ".mp4"
-    elif family in ("vp9", "av1", "ffv1", "dnxhd"):
-        ext = ".mkv"
+        container = "mp4"
+    elif family in ("x266", "vp9", "av1", "ffv1", "dnxhd"):
+        container = "mkv"
     elif family == "prores":
-        ext = ".mov"
+        container = "mov"
     else:
-        ext = ".avi"
+        container = "avi"
     return os.path.join(os.path.dirname(options.inputfile),
-                        "autoffmpeg_" + stem + ext)
+                        "autoffmpeg_" + stem + "." + container)
+
+
+def resolve_outputfile(options: EncodeOptions, probe: ProbeInfo) -> str:
+    """Resolve the user-selected base name and container to one final path."""
+    if not options.output_base and not options.outputfile:
+        return default_output(options, probe)
+    if options.output_base:
+        base = options.output_base
+    else:
+        current = Path(options.outputfile)
+        base = str(current.with_suffix("")) if current.suffix else str(current)
+    container = options.container.lower().lstrip(".") if options.container else ""
+    if not container and Path(options.outputfile).suffix:
+        container = Path(options.outputfile).suffix.lstrip(".").lower()
+    if not container:
+        container = "mkv"
+    return base + "." + container
+
+
+def normalize_output(options: EncodeOptions, probe: ProbeInfo) -> str:
+    options.outputfile = resolve_outputfile(options, probe)
+    if not options.output_base:
+        options.output_base = str(Path(options.outputfile).with_suffix(""))
+    return options.outputfile
 
 
 def _video_core(options: EncodeOptions, probe: ProbeInfo, binaries, family,
-                hw, vf, passlog, hdr, video_args) -> List[str]:
+                hw, vf, passlog, hdr, video_args,
+                input_plan: Optional[InputPlan] = None,
+                extra_inputs: Optional[List[str]] = None) -> List[str]:
     """Common video-encoding prefix shared by muxed and raw outputs."""
     cmd = [binaries.ffmpeg if binaries else "ffmpeg", "-y",
            "-progress", "pipe:1", "-nostats"]
@@ -706,7 +1076,9 @@ def _video_core(options: EncodeOptions, probe: ProbeInfo, binaries, family,
         cmd += init
     if hw == "vaapi":
         cmd += ["-vaapi_device", detect_vaapi_device()]
-    cmd += ["-i", options.inputfile]
+    cmd += input_args(input_plan or InputPlan(inputs=[options.inputfile]))
+    for path in extra_inputs or []:
+        cmd += ["-i", path]
     if options.trim_start:
         cmd += ["-ss", options.trim_start]
     if options.trim_end:
@@ -729,7 +1101,7 @@ def _video_core(options: EncodeOptions, probe: ProbeInfo, binaries, family,
     has_pix = any(a == "-pix_fmt" for a in video_args)
     pix = hdr["pix"]
     if not pix and not hw and not has_pix and \
-            family in ("x264", "x265", "vp9", "av1"):
+            family in ("x264", "x265", "x266", "vp9", "av1"):
         pix = "yuv420p"
     if pix:
         cmd += ["-pix_fmt", pix]
@@ -738,9 +1110,11 @@ def _video_core(options: EncodeOptions, probe: ProbeInfo, binaries, family,
 
 def _base_cmd(options: EncodeOptions, probe: ProbeInfo, binaries,
               family, hw, mode, vf, passlog, hdr, video_args, audio_args,
-              filter_complex, maps, sub_args, out_is_mp4) -> List[str]:
+              filter_complex, maps, sub_args, out_is_mp4,
+              input_plan: Optional[InputPlan] = None,
+              extra_inputs: Optional[List[str]] = None) -> List[str]:
     cmd = _video_core(options, probe, binaries, family, hw, vf, passlog,
-                      hdr, video_args)
+                      hdr, video_args, input_plan, extra_inputs)
     if family == "x265" and out_is_mp4:
         cmd += ["-tag:v", "hvc1"]
     if filter_complex:
@@ -760,13 +1134,17 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
                           binaries=None, available_encoders: Optional[set] = None,
                           log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
     """Build per-stream jobs (video/audio/subtitle) without muxing them."""
-    if not options.inputfile or not os.path.exists(options.inputfile):
+    if not source_exists(options):
         return []
     if available_encoders is not None:
         options.available_encoders = available_encoders
     ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
-    base_dir = os.path.dirname(options.inputfile)
-    stem = Path(options.inputfile).stem
+    input_plan = build_input_plan(options, probe)
+    script_cleanup = ([input_plan.generated_script]
+                      if input_plan.generated_script and
+                      not options.avisynth.keep_generated_script else [])
+    base_dir = os.path.dirname(options.outputfile or options.inputfile)
+    stem = Path(options.outputfile or options.inputfile).stem
     jobs: List[EncodeJob] = []
 
     family = effective_family(options, probe)
@@ -794,12 +1172,13 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
         passlog = (os.path.join(tempfile.gettempdir(), "autoffmpeg2pass")
                    if mode == "2-pass bitrate" else None)
         cleanup = list(dovi["cleanup"])
+        cleanup += script_cleanup
         if passlog:
             cleanup += [passlog + "-0.log", passlog + "-0.log.mbtree"]
 
         def vcmd(video_args):
             core = _video_core(options, probe, binaries, family, hw, vf,
-                               passlog, hdr, video_args)
+                               passlog, hdr, video_args, input_plan)
             return core + ["-an", "-sn", "-f", vfmt, "-threads", "0",
                            "-y", vout]
 
@@ -808,7 +1187,7 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
             jobs.append(EncodeJob(
                 f"Pass 1 -> {Path(vout).name}",
                 vcmd(build_video_args(options, probe, 1, log)),
-                probe.duration, cleanup=cleanup))
+                probe.duration))
             jobs.append(EncodeJob(
                 f"Pass 2 -> {Path(vout).name}",
                 vcmd(build_video_args(options, probe, 2, log)),
@@ -819,8 +1198,15 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
                 vcmd(build_video_args(options, probe, 0, log)),
                 probe.duration, cleanup=cleanup))
 
+    external_jobs, _ = build_external_audio_jobs(
+        options, probe, input_plan, binaries, output_dir=base_dir,
+        cleanup_outputs=False)
+    jobs.extend(external_jobs)
+
     # --- audio elementary streams ---
     for i, row in enumerate([r for r in options.audio if r.enabled]):
+        if (row.encoder or "ffmpeg").lower() != "ffmpeg":
+            continue
         codec = row.codec
         if codec == "Copy":
             src_codec = ""
@@ -847,13 +1233,13 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
                 aargs += ["-ar", row.sampling]
 
         aout = os.path.join(base_dir, f"{stem}_audio{i}{ext}")
-        cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats",
-               "-i", options.inputfile]
+        cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats"]
+        cmd += input_args(input_plan)
         if options.trim_start:
             cmd += ["-ss", options.trim_start]
         if options.trim_end:
             cmd += ["-to", options.trim_end]
-        cmd += ["-map", f"0:a:{row.input_index}"] + aargs
+        cmd += ["-map", f"{input_plan.audio_index}:a:{row.input_index}"] + aargs
         measures: List[Measure] = []
         if codec != "Copy":
             if options.gain:
@@ -871,8 +1257,8 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
                         ":offset=__LN_OFF_0__:linear=true:print_format=summary")
                 cmd += ["-af", filt]
                 measures.append(Measure(
-                    cmd=[ffmpeg, "-hide_banner", "-i", options.inputfile,
-                         "-map", f"0:a:{row.input_index}",
+                    cmd=[ffmpeg, "-hide_banner"] + input_args(input_plan) + [
+                         "-map", f"{input_plan.audio_index}:a:{row.input_index}",
                          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:"
                                 "print_format=json",
                          "-f", "null", "-"],
@@ -884,6 +1270,8 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
 
     # --- subtitle elementary streams ---
     for i, s in enumerate([s for s in options.subs if s.enabled]):
+        if s.burn:
+            continue
         src = {}
         if s.input_index < len(probe.subtitle_tracks):
             src = probe.subtitle_tracks[s.input_index]
@@ -897,18 +1285,19 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
             log(f"[info] subtitle {i}: cannot extract codec '{codec}'; skipping")
             continue
         sout = os.path.join(base_dir, f"{stem}_sub{i}{ext}")
-        cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats",
-               "-i", options.inputfile, "-map", f"0:s:{s.input_index}",
+        cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats"]
+        cmd += input_args(input_plan) + [
+               "-map", f"{input_plan.subtitle_index}:s:{s.input_index}",
                "-vn", "-an"] + sargs + ["-f", fmt, "-y", sout]
         jobs.append(EncodeJob(f"Subtitle {i} -> {Path(sout).name}", cmd,
                               is_video=False))
     return jobs
 
 
-def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
-               available_encoders: Optional[set] = None,
-               log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
-    if not options.inputfile or not os.path.exists(options.inputfile):
+def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
+                       available_encoders: Optional[set] = None,
+                       log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
+    if not source_exists(options):
         return []
     if options.nomux:
         return build_elementary_jobs(options, probe, binaries,
@@ -919,12 +1308,20 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
         options.available_encoders = available_encoders
 
     ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
+    input_plan = build_input_plan(options, probe)
+    script_cleanup = ([input_plan.generated_script]
+                      if input_plan.generated_script and
+                      not options.avisynth.keep_generated_script else [])
 
     # --- Remux (copy all streams) ---
     if options.mode == "Remux (copy all)":
+        if avisynth_active(options):
+            log("[warning] Remux is not compatible with AviSynth processing; "
+                "choose an encoding mode instead.")
+            return []
         out_is_mp4 = Path(options.outputfile).suffix.lower() == ".mp4"
         cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats",
-               "-i", options.inputfile, "-map", "0", "-c", "copy"]
+               ] + input_args(input_plan) + ["-map", "0", "-c", "copy"]
         if out_is_mp4:
             cmd += ["-movflags", "+faststart"]
         cmd += ["-y", options.outputfile]
@@ -933,10 +1330,18 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 
     # --- Audio only ---
     if options.mode == "Audio only":
+        external_jobs, external_files = build_external_audio_jobs(
+            options, probe, input_plan, binaries,
+            output_dir=os.path.dirname(options.outputfile),
+            cleanup_outputs=False)
         aargs, filter_complex, measures, audio_maps = build_audio_plan(
-            options, probe, binaries)
+            options, probe, binaries, input_plan, external_files)
+        extra_inputs = [path for _, path in external_files]
         cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats",
-               "-i", options.inputfile, "-vn"]
+               ] + input_args(input_plan)
+        for path in extra_inputs:
+            cmd += ["-i", path]
+        cmd += ["-vn"]
         if options.trim_start:
             cmd += ["-ss", options.trim_start]
         if options.trim_end:
@@ -947,8 +1352,10 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
         cmd += audio_maps
         cmd += ["-sn"]
         cmd += ["-y", options.outputfile]
-        return [EncodeJob(f"Audio -> {Path(options.outputfile).name}",
-                          cmd, probe.duration, measures=measures, is_video=False)]
+        cleanup = script_cleanup + extra_inputs
+        return external_jobs + [EncodeJob(f"Audio -> {Path(options.outputfile).name}",
+                          cmd, probe.duration, measures=measures,
+                          cleanup=cleanup, is_video=False)]
 
     family0 = options.preset.get("family", "x264")
     family = effective_family(options, probe)
@@ -985,21 +1392,29 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     if burn_filter:
         vf.append(burn_filter)
 
+    external_jobs, external_files = build_external_audio_jobs(
+        options, probe, input_plan, binaries,
+        output_dir=os.path.dirname(options.outputfile), cleanup_outputs=False)
     aargs, filter_complex, measures, audio_maps = build_audio_plan(
-        options, probe, binaries)
+        options, probe, binaries, input_plan, external_files)
+    extra_inputs = [path for _, path in external_files]
     out_is_mp4 = Path(options.outputfile).suffix.lower() == ".mp4"
     passlog = (os.path.join(tempfile.gettempdir(), "autoffmpeg2pass")
                if mode == "2-pass bitrate" else None)
-    video_maps, sub_maps, sub_args = build_stream_args(options, probe, out_is_mp4)
+    video_maps, sub_maps, sub_args = build_stream_args(
+        options, probe, out_is_mp4, input_plan)
     maps = video_maps + audio_maps + sub_maps
 
     def base(video_args, audio_args):
         return _base_cmd(options, probe, binaries, family, hw, mode, vf,
                          passlog, hdr, video_args, audio_args, filter_complex,
-                         maps, sub_args, out_is_mp4)
+                         maps, sub_args, out_is_mp4, input_plan, extra_inputs)
 
     jobs = list(dovi["pre_jobs"])
+    jobs += external_jobs
     cleanup = list(dovi["cleanup"])
+    cleanup += script_cleanup
+    cleanup += extra_inputs
     if passlog:
         cleanup += [passlog + "-0.log", passlog + "-0.log.mbtree"]
 
@@ -1008,7 +1423,7 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
         p2 = base(build_video_args(options, probe, 2, log), aargs)
         jobs.append(EncodeJob(
             f"Pass 1 -> {Path(options.outputfile).name}", p1, probe.duration,
-            cleanup=cleanup))
+            cleanup=[]))
         jobs.append(EncodeJob(
             f"Pass 2 -> {Path(options.outputfile).name}", p2, probe.duration,
             measures=measures, cleanup=cleanup))
@@ -1018,6 +1433,95 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
             base(build_video_args(options, probe, 0, log), aargs),
             probe.duration, measures=measures, cleanup=cleanup))
     return jobs
+
+
+def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
+    """Return the raw track paths produced for an MKV encode."""
+    base_dir = os.path.dirname(options.outputfile or options.inputfile)
+    stem = Path(options.outputfile or options.inputfile).stem
+    family = effective_family(options, probe)
+    paths = []
+    if probe.has_video and family != "copy" and options.mode != "Copy video":
+        _fmt, ext = VIDEO_RAW_FORMATS.get(family, ("matroska", ".mkv"))
+        paths.append(os.path.join(base_dir, f"{stem}_video{ext}"))
+    selected = [row for row in options.audio if row.enabled]
+    for output_index, row in enumerate(selected):
+        tool = (row.encoder or "ffmpeg").lower()
+        if tool != "ffmpeg":
+            ext = EXTERNAL_AUDIO_ENCODERS.get(tool, ("", ""))[1]
+        elif row.codec == "Copy":
+            src = probe.audio_tracks[row.input_index] \
+                if row.input_index < len(probe.audio_tracks) else {}
+            ext = SOURCE_AUDIO_FORMATS.get(
+                (src.get("codec_name") or "").lower(), ("", ""))[1]
+        else:
+            ext = AUDIO_RAW_FORMATS.get(row.codec, ("", ""))[1]
+        if ext:
+            if tool != "ffmpeg":
+                name = f"{stem}.autoffmpeg_audio{output_index}{ext}"
+            else:
+                name = f"{stem}_audio{output_index}{ext}"
+            paths.append(os.path.join(base_dir, name))
+    for output_index, row in enumerate([s for s in options.subs if s.enabled]):
+        if row.burn:
+            continue
+        src = probe.subtitle_tracks[row.input_index] \
+            if row.input_index < len(probe.subtitle_tracks) else {}
+        codec = (src.get("codec_name") or "").lower()
+        if codec in TEXT_SUB_FORMATS:
+            ext = TEXT_SUB_FORMATS[codec][1]
+        elif codec == "hdmv_pgs_subtitle":
+            ext = ".sup"
+        else:
+            continue
+        paths.append(os.path.join(base_dir, f"{stem}_sub{output_index}{ext}"))
+    return paths
+
+
+def build_mkv_encode_jobs(options: EncodeOptions, probe: ProbeInfo,
+                          binaries=None,
+                          available_encoders: Optional[set] = None,
+                          log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
+    """Encode elementary streams, then mux them into the selected MKV."""
+    raw_jobs = build_elementary_jobs(options, probe, binaries,
+                                     available_encoders, log)
+    if not raw_jobs:
+        return []
+    produced = set()
+    for job in raw_jobs:
+        produced.update(job.cmd)
+        for command in job.pipeline:
+            produced.update(command)
+    tracks = [{"path": path} for path in elementary_track_paths(options, probe)
+              if path in produced]
+    if not tracks:
+        return raw_jobs
+    if binaries and binaries.has("mkvmerge"):
+        cmd = build_mkvmerge_command(tracks, options.outputfile,
+                                     binaries.mkvmerge)
+        tool = "mkvmerge"
+    else:
+        cmd = build_ffmpeg_mux_command(tracks, options.outputfile,
+                                       binaries.ffmpeg if binaries else "ffmpeg")
+        tool = "ffmpeg"
+    cleanup = [track["path"] for track in tracks]
+    raw_jobs.append(EncodeJob(
+        f"Mux -> {Path(options.outputfile).name} ({tool})", cmd,
+        probe.duration, cleanup=cleanup, is_video=False))
+    return raw_jobs
+
+
+def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
+               available_encoders: Optional[set] = None,
+               log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
+    normalize_output(options, probe)
+    if (Path(options.outputfile).suffix.lower() == ".mkv" and
+            options.mode not in ("Remux (copy all)", "Audio only",
+                                 "Copy video") and
+            effective_family(options, probe) != "copy" and not options.nomux):
+        return build_mkv_encode_jobs(options, probe, binaries,
+                                     available_encoders, log)
+    return _build_direct_jobs(options, probe, binaries, available_encoders, log)
 
 
 # --------------------------------------------------------------------------- #
@@ -1069,12 +1573,12 @@ def extract_frames_command(ffmpeg, inputfile, outdir, count=6):
 # --------------------------------------------------------------------------- #
 
 
-def build_mkvmerge_command(tracks, output) -> List[str]:
+def build_mkvmerge_command(tracks, output, binary="mkvmerge") -> List[str]:
     """Build an `mkvmerge` command from a list of track dicts.
 
     Each track dict: {path, kind, language, forced, default, delay_ms}.
     """
-    cmd = ["mkvmerge", "-o", output]
+    cmd = [binary, "-o", output]
     for t in tracks:
         opts = []
         if t.get("language"):
@@ -1089,9 +1593,9 @@ def build_mkvmerge_command(tracks, output) -> List[str]:
     return cmd
 
 
-def build_ffmpeg_mux_command(tracks, output) -> List[str]:
+def build_ffmpeg_mux_command(tracks, output, binary="ffmpeg") -> List[str]:
     """Build an `ffmpeg -c copy` mux command from a list of track dicts."""
-    cmd = ["ffmpeg", "-y", "-hide_banner"]
+    cmd = [binary, "-y", "-hide_banner"]
     for t in tracks:
         delay = t.get("delay_ms")
         if delay:
@@ -1120,6 +1624,7 @@ def build_ffmpeg_mux_command(tracks, output) -> List[str]:
 
 def job_to_dict(job: EncodeJob) -> dict:
     return {
+        "schema": 2,
         "label": job.label,
         "cmd": list(job.cmd),
         "duration": job.duration,
@@ -1127,6 +1632,7 @@ def job_to_dict(job: EncodeJob) -> dict:
                      for m in job.measures],
         "cleanup": list(job.cleanup),
         "is_video": job.is_video,
+        "pipeline": [list(cmd) for cmd in job.pipeline],
     }
 
 
@@ -1140,4 +1646,5 @@ def job_from_dict(data: dict) -> EncodeJob:
                   for m in data.get("measures", [])],
         cleanup=list(data.get("cleanup", [])),
         is_video=bool(data.get("is_video", True)),
+        pipeline=[list(cmd) for cmd in data.get("pipeline", [])],
     )

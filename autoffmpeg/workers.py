@@ -18,7 +18,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .config import BINARY_DIR, IS_WINDOWS, detect_hw_encoders, make_executable
+from .config import (BINARY_DIR, IS_WINDOWS, detect_hw_encoders,
+                     detect_software_encoders, make_executable)
 from .core import compute_loudnorm, parse_cropdetect
 
 _PROGRESS_KEYS = re.compile(
@@ -46,12 +47,16 @@ class EncodeThread(QThread):
         super().__init__(parent)
         self.jobs = jobs
         self._proc = None
+        self._pipeline_procs = []
         self._cancel = False
 
     def cancel(self):
         self._cancel = True
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
+        for proc in self._pipeline_procs:
+            if proc.poll() is None:
+                proc.terminate()
 
     def _run_measure(self, measure):
         try:
@@ -84,6 +89,45 @@ class EncodeThread(QThread):
             except OSError:
                 pass
 
+    def _run_pipeline(self, pipeline):
+        """Run an argv-only binary pipeline (used by external audio tools)."""
+        if not pipeline:
+            return 0
+        processes = []
+        previous = None
+        try:
+            for index, command in enumerate(pipeline):
+                last = index == len(pipeline) - 1
+                proc = subprocess.Popen(
+                    command,
+                    stdin=previous.stdout if previous else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT if last else subprocess.DEVNULL,
+                    bufsize=0)
+                if previous:
+                    previous.stdout.close()
+                processes.append(proc)
+                self._pipeline_procs = processes
+                previous = proc
+            final = processes[-1]
+            if final.stdout:
+                for raw_line in final.stdout:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                    if line:
+                        self.log_line.emit(line)
+                final.stdout.close()
+            for proc in processes:
+                proc.wait()
+            return next((p.returncode for p in processes if p.returncode), 0)
+        except OSError as exc:
+            self.log_line.emit(f"[error] cannot start pipeline: {exc}")
+            for proc in processes:
+                if proc.poll() is None:
+                    proc.terminate()
+            return -1
+        finally:
+            self._pipeline_procs = []
+
     def run(self):
         total = len(self.jobs)
         for i, job in enumerate(self.jobs):
@@ -100,6 +144,11 @@ class EncodeThread(QThread):
                         substitutions[token] = values.get(kind, "0")
                 cmd = self._substitute(cmd, substitutions)
 
+            if job.pipeline:
+                code = self._run_pipeline(job.pipeline)
+                self._cleanup(job.cleanup)
+                self.job_done.emit(i, code)
+                continue
             try:
                 self._proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -158,6 +207,8 @@ class EncodeThread(QThread):
                     self._proc.terminate()
                     break
 
+            if self._proc.stdout:
+                self._proc.stdout.close()
             self._proc.wait()
             self._cleanup(job.cleanup)
             self.job_done.emit(i, self._proc.returncode)
@@ -191,7 +242,8 @@ class HwDetectThread(QThread):
         self.ffmpeg = ffmpeg
 
     def run(self):
-        self.result.emit(detect_hw_encoders(self.ffmpeg))
+        self.result.emit(detect_hw_encoders(self.ffmpeg) |
+                         detect_software_encoders(self.ffmpeg))
 
 
 class DownloadThread(QThread):

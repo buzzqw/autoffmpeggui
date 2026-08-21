@@ -18,6 +18,8 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 ## Highlights
 
 - Modern cross-platform PyQt6 interface.
+- Guided Quick Encode wizard for the common workflow, with expert options
+  hidden until requested.
 - Automatic `ffprobe` analysis of resolution, frame rate, duration, HDR data,
   audio tracks and subtitle tracks.
 - H.264, H.265/HEVC, AV1, VP9, MPEG-4, Xvid, MPEG-2, WMV and lossless/archive
@@ -48,6 +50,12 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 - User-editable `profile.txt` custom profiles.
 - Encoding queue with live progress, FPS, speed, ETA and complete FFmpeg log.
 - Input playback and filtered preview through `ffplay`.
+- AviSynth+ tab with generated or external `.avs` scripts, FFMS2 templates,
+  plugin loading and AviSynth-aware video/audio stream mapping.
+- Encoder options tab for x264, x265, x266/VVC and AV1 profile overrides.
+- External audio pipelines for LAME, FAAC and `oggenc` when installed.
+- Blu-ray ISO/BDMV source selection through libbluray, including playlist,
+  angle and chapter input options.
 - FFmpeg tab with static-binary download, source URLs and installation status.
 - Automatic `ffplay` fallback from the system or a separate static archive when
   the main FFmpeg archive does not contain it.
@@ -61,6 +69,21 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 - PyQt6.
 - FFmpeg, FFprobe and FFplay in `PATH`, or in the local `applications/`
   directory.
+
+For Linux AviSynth+ processing, install a native AviSynth+ runtime and a source
+plugin. On Arch Linux:
+
+```bash
+sudo pacman -S --needed avisynthplus ffms2 devil
+```
+
+The Arch `ffms2` package installs `/usr/lib/avisynth/libffms2.so`. The `devil`
+package is needed by the optional `libimageseq.so` plugin shipped with
+`avisynthplus`. Also install `lame`, `faac`, `vorbis-tools` and
+`mkvtoolnix-cli` when testing external audio and muxing workflows.
+Install `libbluray` for Blu-ray ISO/BDMV scanning. Commercial encrypted discs
+are not decrypted by AutoFFmpeg; use a legally obtained decrypted folder or
+playlist source.
 
 If FFmpeg is not installed, use the **FFmpeg** tab inside the application. The
 download manager installs the required binaries into `applications/` and gives
@@ -138,11 +161,53 @@ The **Files** panel is always visible at the top of the window.
   chain with `ffplay`.
 - **Shots**: extract preview thumbnails with ffmpeg and open the folder.
 - **Add folder**: add every media file in a folder to the queue.
-- **Output**: enter an output path or select one with **Browse...**.
+- **Output name**: enter the final path without an extension, or choose the base
+  name with **Browse...**.
+- **Container**: select `MP4`, `MKV`, `MOV` or `AVI` independently from the
+  output name.
 
-When no output path is selected, AutoFFmpegGui creates a default output beside
-the input file. The extension is chosen from the selected video family when
-possible.
+When no output name is selected, AutoFFmpegGui creates a default output beside
+the input file. The selected container supplies the final extension. MP4 is the
+default container for normal H.264/H.265 encoding.
+
+#### Output containers and MKV muxing
+
+MP4 output is encoded and muxed directly by FFmpeg. For normal MKV encoding,
+AutoFFmpegGui deliberately separates the operations:
+
+1. Encode the video to an elementary stream.
+2. Encode each selected audio track to its raw/container stream.
+3. Encode each selected subtitle track separately when supported.
+4. Mux the resulting streams into the final MKV.
+
+The final mux uses `mkvmerge` from MKVToolNix when it is installed. If
+`mkvmerge` is unavailable, FFmpeg performs the same final operation with stream
+copy. This is separate from **Export separate streams (no mux)**, which stops
+after the elementary files and does not create a final container.
+
+### Quick Encode wizard
+
+Use **Quick wizard** for the normal workflow. It asks for the source, encoder
+profile, quality mode, audio/subtitle tracks and output in a short sequence.
+The final page applies the settings to the main window and runs the same
+preflight checks as expert mode. **Advanced options** reveals AviSynth+, Blu-ray,
+Profiles, Encoder options, Muxing and Log only when those tools are needed.
+
+### Blu-ray sources
+
+Click **Blu-ray...** or use the **Blu-ray** tab to select an ISO image or a
+folder containing `BDMV`. AutoFFmpeg passes the source to FFmpeg's `bluray`
+protocol and exposes:
+
+- automatic playlist selection or an explicit playlist number;
+- angle selection;
+- starting chapter;
+- libbluray scan output for diagnostics.
+
+After **Use and analyze**, the normal audio, subtitle, AviSynth and encoder
+workflow is used. Playlist-aware handling is preferred over manually joining
+`.m2ts` files, because a Blu-ray title can use seamless branching. Commercial
+encrypted media is not decrypted by the application.
 
 ### Audio / Video
 
@@ -156,7 +221,7 @@ controls. The audio and subtitle track selection lives in the separate
 - **Mode**:
   - **Quality (CRF)** for quality-based encoding.
   - **1-pass bitrate** for a single bitrate-controlled pass.
-  - **2-pass bitrate** for bitrate allocation over two passes.
+- **2-pass bitrate** for bitrate allocation over two passes.
   - **Copy video** to avoid re-encoding the video stream.
   - **Remux (copy all)** to copy every stream into a new container.
   - **Audio only** to extract the selected audio tracks.
@@ -178,6 +243,41 @@ The application avoids using hardware encoders for HDR modes that require a
 software 10-bit HEVC workflow. It also converts unsupported hardware two-pass
 requests to a supported one-pass mode.
 
+For software two-pass encoding, pass 1 and pass 2 are executed sequentially by
+the worker. The encoder passlog is retained between the two jobs and cleaned
+only after pass 2 finishes.
+
+#### Encoder options
+
+The **Encoder options** tab exposes a catalog of common x264, x265, x266/VVC
+and AV1 options for the selected profile. Values entered there override the
+automatically generated FFmpeg option once, so a profile's `preset`, `crf`,
+rate-control or tuning values can be changed without editing the command.
+Common choices use drop-down lists, numeric fields reject invalid values, and
+boolean options use three-state checkboxes: checked enables the option,
+unchecked disables it, and partially checked leaves the encoder default.
+The final `custom-option` row accepts options introduced by newer FFmpeg
+versions. Empty values are ignored. x266 is represented by `libvvenc` when the
+installed FFmpeg provides it; the standard Arch build may not include it.
+
+#### AviSynth+
+
+The **AviSynth+** tab supports two workflows:
+
+- Leave **External script** empty to generate a stable `.avs` file beside the
+  output. The template supports `{{INPUT}}`, `{{SOURCE_FILTER}}`,
+  `{{PLUGIN_LOADS}}` and `{{VIDEO_FILTERS}}`.
+- Select an existing `.avs` file to use it as the complete source.
+
+When a script is generated from a normal media file, FFmpeg receives two
+inputs: AviSynth supplies the processed video and the original file supplies
+audio/subtitles. This prevents AviSynth video processing from removing the
+original tracks. Remux-copy mode is intentionally disabled for AviSynth jobs.
+
+On Linux the FFmpeg binary must include the `avisynth` demuxer and the runtime,
+source plugin and plugin dependencies must be ABI-compatible. Loading an `.avs`
+executes its script and plugins, so only use scripts you trust.
+
 #### Audio tracks
 
 Every detected audio stream appears as an independent row.
@@ -192,6 +292,13 @@ For each row:
 5. Select or type the sampling rate, or keep `auto`.
 
 Available audio modes are AAC, MP3, FLAC, OGG/Vorbis, AC-3 and Copy.
+
+The **Encoder** selector can use FFmpeg or an external tool. LAME is used for
+MP3, FAAC for AAC and `oggenc` for Ogg/Vorbis. External tools receive WAV over
+an internal process pipeline, never through a shell. The **extra args** field
+passes additional argv options to the selected tool. For LAME, multichannel
+source audio is downmixed to stereo automatically unless an explicit channel
+count is selected.
 
 This means one source can be converted, for example, to AAC stereo for a
 phone, AC-3 5.1 for a TV and stream-copy for an additional original track in
@@ -287,6 +394,9 @@ The **Queue** tab allows you to:
 - Review queued jobs.
 - Remove selected jobs.
 - Clear the queue.
+- Move jobs up or down.
+- Duplicate a job.
+- Inspect the exact command or external pipeline for a selected job.
 - Save and load the queue (`autoffmpeg_queue.json`).
 - Start all queued jobs with **Start Queue**.
 
@@ -367,10 +477,42 @@ The **Log** tab shows:
 - Download progress and extraction messages.
 - Hardware encoder detection messages.
 
+For MKV jobs the log also shows the raw stream commands followed by the final
+`mkvmerge` or FFmpeg mux command. A failed pass or mux job marks the complete
+job as failed and prevents the normal post-encode action.
+
 Use **Clear log** to remove the current log contents.
 
 All log messages are also appended to `autoffmpeg.log` in the project
 directory. The file is rotated automatically when it grows above 2 MB.
+
+### Real media regression suite
+
+Run the complete multitrack regression suite from the repository root:
+
+```bash
+python3 tests/run_media_suite.py
+```
+
+The suite uses `test_multitrack.mkv`, which contains one HEVC video, four audio
+tracks and three subtitle tracks. It executes real output jobs for x264, x265
+and available AV1, all installed FFmpeg and external audio encoders, three
+subtitle modes, and AviSynth enabled/disabled. Each case creates an output in a
+temporary directory and checks its size and `ffprobe` stream list. Reports are
+written to:
+
+- `test_reports/multitrack_media_report.json` for machine-readable details;
+- `test_reports/multitrack_media_report.md` for a human-readable summary.
+
+The checked matrix currently contains 288 real combinations and includes the
+GUI-independent worker path for raw MKV muxing, two-pass sequencing and
+subtitle burn-in. A separate headless GUI smoke test verifies output-base and
+container selection before a first job is built.
+
+Use `python3 tests/run_media_suite.py --limit 10` during development. The full
+matrix can also be run through unittest with
+`AUTOFFMPEG_FULL_MATRIX=1 python3 -m unittest tests.test_multitrack_matrix -v`.
+Unavailable encoders are listed explicitly in the report.
 
 ### Themes and settings
 
@@ -384,6 +526,13 @@ The status bar contains the light/dark theme button. Settings are stored in
 - Quality and bitrate values.
 - HDR values.
 - Resize and audio-processing preferences.
+- Output container preference.
+- AviSynth enabled state, script template and plugin paths.
+
+Persistent advanced settings are intentionally restored on startup. If a
+previous AviSynth job should not affect a normal encode, confirm that
+**Enable AviSynth+** is off and that the generated command does not contain an
+`.avs` input.
 
 ## Custom Profiles
 
@@ -531,11 +680,12 @@ Inspect the generated command and FFmpeg output in **Log**. Common causes are:
 
 ```text
 ffmpegx.py          Launcher
-autoffmpeg/         Application package (config, core, workers, ui, app)
+autoffmpeg/         Application package (core, validation, wizard, bluray, ui)
 profile.txt         Custom video profiles
 config.ini          Persistent user settings
 applications/       Optional local FFmpeg binaries
-tests/              Unit tests for the command-building logic
+tests/              Unit and real-media regression tests
+test_reports/       JSON/Markdown media matrix reports
 _paypal_logo.png    PayPal support button artwork
 ```
 

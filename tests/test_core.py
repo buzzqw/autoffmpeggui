@@ -9,6 +9,8 @@ import unittest
 
 from autoffmpeg.core import (
     AudioSelection,
+    AvisynthOptions,
+    InputPlan,
     EncodeJob,
     EncodeOptions,
     ProbeInfo,
@@ -16,6 +18,9 @@ from autoffmpeg.core import (
     build_audio_plan,
     build_ffmpeg_mux_command,
     build_jobs,
+    build_external_audio_jobs,
+    build_input_plan,
+    encoder_option_catalog,
     build_mkvmerge_command,
     build_stream_args,
     build_video_args,
@@ -25,10 +30,15 @@ from autoffmpeg.core import (
     hdr_parts,
     job_from_dict,
     job_to_dict,
+    normalize_output,
     parse_cropdetect,
     pb_profile_parse,
     plan_dovi,
+    probe_duration,
 )
+from autoffmpeg.validation import preflight
+from autoffmpeg.bluray import (BlurayOptions, bluray_input_options,
+                               bluray_url, is_bluray_path, parse_bluray_info)
 
 
 class TestDetectFamily(unittest.TestCase):
@@ -41,6 +51,66 @@ class TestDetectFamily(unittest.TestCase):
         self.assertEqual(detect_family("-c:v prores_ks"), "prores")
         self.assertEqual(detect_family("-c:v ffv1"), "ffv1")
         self.assertEqual(detect_family(""), "x264")
+        self.assertEqual(detect_family("-c:v libvvenc"), "x266")
+
+
+class TestAdvancedOptions(unittest.TestCase):
+    def test_encoder_override_replaces_default(self):
+        o = EncodeOptions(
+            preset={"family": "x264", "xpreset": "medium"},
+            encoder_options={"preset": "slow", "aq-mode": "3"})
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args.count("-preset"), 1)
+        self.assertIn("slow", args)
+        self.assertIn(["-aq-mode", "3"], [args[i:i + 2]
+                                             for i in range(len(args) - 1)])
+
+    def test_encoder_catalog_has_vvc_and_av1(self):
+        self.assertIn("qp", encoder_option_catalog("x266"))
+        self.assertIn("crf", encoder_option_catalog("av1"))
+
+    def test_probe_duration_frame_fallback(self):
+        data = {"format": {"duration": "N/A"}, "streams": [
+            {"codec_type": "video", "nb_frames": "50",
+             "avg_frame_rate": "25/1"}]}
+        self.assertEqual(probe_duration(data), 2.0)
+
+    def test_preflight_rejects_invalid_combinations(self):
+        with tempfile.NamedTemporaryFile(suffix=".mkv", delete=False) as fh:
+            inputfile = fh.name
+        try:
+            o = EncodeOptions(
+                inputfile=inputfile, outputfile="/tmp/out.mp4",
+                preset={"family": "x266"},
+                audio=[AudioSelection(0, codec="OGG (Vorbis)", encoder="oggenc",
+                                      bitrate=96)],
+                audio_tools={"oggenc": "/missing/oggenc"})
+            issues = preflight(o, ProbeInfo(has_video=True), set())
+            codes = {issue.code for issue in issues}
+            self.assertIn("missing-x266", codes)
+            self.assertIn("vorbis-mp4", codes)
+            self.assertIn("missing-audio-tool", codes)
+        finally:
+            os.unlink(inputfile)
+
+    def test_bluray_source_protocol_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.mkdir(os.path.join(td, "BDMV"))
+            self.assertTrue(is_bluray_path(td))
+            options = BlurayOptions(enabled=True, path=td, playlist=42,
+                                    angle=2, chapter=3)
+            self.assertEqual(bluray_url(options), "bluray:" + td)
+            self.assertEqual(bluray_input_options(options),
+                             ["-playlist", "42", "-angle", "2",
+                              "-chapter", "3"])
+
+    def test_bluray_playlist_metadata_parser(self):
+        titles = parse_bluray_info(
+            "playlist: 00800\nduration: 01:32:10\nchapters: 24\n"
+            "playlist=00801\nduration=00:02:00\n")
+        self.assertEqual(titles[0]["playlist"], 800)
+        self.assertEqual(titles[0]["chapters"], 24)
+        self.assertEqual(titles[1]["playlist"], 801)
 
 
 class TestProfileParse(unittest.TestCase):
@@ -271,12 +341,14 @@ class TestCropdetect(unittest.TestCase):
 class TestJobSerialize(unittest.TestCase):
     def test_roundtrip(self):
         job = EncodeJob("label", ["ffmpeg", "-i", "x"], 12.5,
-                        cleanup=["/tmp/a", "/tmp/b"])
+                        cleanup=["/tmp/a", "/tmp/b"],
+                        pipeline=[["ffmpeg", "-i", "x"], ["lame", "-", "y"]])
         data = job_to_dict(job)
         back = job_from_dict(data)
         self.assertEqual(back.label, "label")
         self.assertEqual(back.cmd, job.cmd)
         self.assertEqual(back.cleanup, job.cleanup)
+        self.assertEqual(back.pipeline, job.pipeline)
 
 
 class TestBuildJobs(unittest.TestCase):
@@ -324,8 +396,77 @@ class TestBuildJobs(unittest.TestCase):
             jobs = build_jobs(o, ProbeInfo(has_video=True, duration=10.0))
             self.assertEqual(len(jobs), 2)
             self.assertIn("-pass", jobs[0].cmd)
+            self.assertEqual(jobs[0].cleanup, [])
+            self.assertTrue(any("autoffmpeg2pass" in p
+                                for p in jobs[1].cleanup))
         finally:
             os.unlink(inputfile)
+
+    def test_output_base_resolves_selected_container(self):
+        o = EncodeOptions(inputfile="/tmp/source.mkv",
+                          output_base="/tmp/final-name", container="mkv")
+        self.assertEqual(normalize_output(o, ProbeInfo()),
+                         "/tmp/final-name.mkv")
+
+    def test_mkv_encoding_builds_raw_tracks_and_ffmpeg_mux_fallback(self):
+        with tempfile.NamedTemporaryFile(suffix=".mkv", delete=False) as fh:
+            inputfile = fh.name
+        try:
+            output = os.path.join(os.path.dirname(inputfile), "final.mkv")
+            o = EncodeOptions(
+                inputfile=inputfile, outputfile=output,
+                preset={"family": "x264", "xpreset": "ultrafast"},
+                audio=[AudioSelection(0, codec="AAC", bitrate=96)])
+            probe = ProbeInfo(has_video=True, duration=1,
+                              audio_tracks=[{"codec_name": "ac3"}])
+            from autoffmpeg.config import Binaries
+            binaries = Binaries(ffmpeg="ffmpeg", mkvmerge="missing-mkvmerge")
+            jobs = build_jobs(o, probe, binaries)
+            self.assertEqual(len(jobs), 3)
+            self.assertIn("-f", jobs[0].cmd)
+            self.assertEqual(jobs[-1].cmd[0], "ffmpeg")
+            self.assertIn("-c", jobs[-1].cmd)
+            self.assertIn("copy", jobs[-1].cmd)
+            self.assertIn(output, jobs[-1].cmd)
+        finally:
+            os.unlink(inputfile)
+
+    def test_avisynth_video_audio_input_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            with open(inputfile, "wb"):
+                pass
+            output = os.path.join(td, "encoded.mp4")
+            o = EncodeOptions(
+                inputfile=inputfile, outputfile=output,
+                preset={"family": "x264"},
+                audio=[AudioSelection(0, codec="AAC")],
+                avisynth=AvisynthOptions(
+                    enabled=True,
+                    plugin_paths=["/usr/lib/avisynth/libffms2.so"]))
+            jobs = build_jobs(o, ProbeInfo(has_video=True, duration=3))
+            self.assertEqual(len(jobs), 1)
+            self.assertIn("avisynth", jobs[0].cmd)
+            self.assertIn(os.path.join(td, "encoded.avs"), jobs[0].cmd)
+            self.assertIn("-map", jobs[0].cmd)
+            self.assertIn("0:a:0", jobs[0].cmd)
+            self.assertTrue(os.path.exists(os.path.join(td, "encoded.avs")))
+
+    def test_external_lame_is_pipeline(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            with open(inputfile, "wb"):
+                pass
+            o = EncodeOptions(
+                inputfile=inputfile,
+                audio=[AudioSelection(0, codec="MP3", encoder="lame")],
+                audio_tools={"lame": "/usr/bin/lame"})
+            jobs, files = build_external_audio_jobs(
+                o, ProbeInfo(duration=1), InputPlan(inputs=[inputfile]),
+                output_dir=td)
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(files[0][0], 0)
+            self.assertEqual(jobs[0].pipeline[-1][0], "/usr/bin/lame")
 
 
 class TestElementaryJobs(unittest.TestCase):

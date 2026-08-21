@@ -88,16 +88,120 @@ def app_settings():
     return QSettings(CONFIG_FILE, QSettings.Format.IniFormat)
 
 
+def default_avisynth_plugin_paths():
+    """Return common system AviSynth+ plugin locations without guessing files."""
+    candidates = [
+        os.path.join("/usr", "lib", "avisynth", "libffms2.so"),
+        os.path.join(BINARY_DIR, "avisynth", "libffms2.so"),
+    ]
+    return [path for path in candidates if os.path.exists(path)]
+
+
 # --------------------------------------------------------------------------- #
 # Codec / encoder tables
 # --------------------------------------------------------------------------- #
 
 CODECS = {
     "x264": "libx264", "x265": "libx265",
+    "x266": "libvvenc",
     "vp9": "libvpx-vp9", "av1": "libsvtav1",
     "mpeg4": "mpeg4", "xvid": "libxvid",
     "mpeg2": "mpeg2video", "wmv": "wmv2", "prores": "prores_ks",
     "dnxhd": "dnxhd", "ffv1": "ffv1",
+}
+
+# Common options exposed by the encoder profile editor.  The editor is not
+# limited to this list: users can add any FFmpeg option in the custom rows.
+# Values are defaults shown as hints, not options forced on every encode.
+ENCODER_OPTION_CATALOG = {
+    "x264": {
+        "preset": "medium", "tune": "", "profile:v": "", "crf": "23",
+        "bframes": "", "ref": "", "keyint": "", "min-keyint": "",
+        "scenecut": "", "me": "", "subme": "", "aq-mode": "",
+        "aq-strength": "", "psy-rd": "", "deblock": "", "cabac": "",
+        "threads": "", "level": "",
+    },
+    "x265": {
+        "preset": "medium", "tune": "", "profile:v": "", "crf": "23",
+        "bitrate": "", "keyint": "", "min-keyint": "", "bframes": "",
+        "ref": "", "rd": "", "subme": "", "aq-mode": "",
+        "aq-strength": "", "psy-rd": "", "sao": "", "deblock": "",
+        "ctu": "", "qcomp": "", "level-idc": "",
+    },
+    "x266": {
+        "preset": "medium", "profile:v": "", "qp": "", "b:v": "",
+        "gop-size": "", "ref": "", "threads": "", "level": "",
+    },
+    "av1": {
+        "preset": "", "crf": "30", "b:v": "", "keyint": "",
+        "tiles": "", "svtav1-params": "", "cpu-used": "",
+        "usage": "", "tune": "", "film-grain": "",
+    },
+}
+
+# UI metadata for the guided encoder editor. ``choices`` use an empty first
+# value to mean "leave the profile/FFmpeg default unchanged".
+ENCODER_OPTION_SPECS = {
+    "x264": {
+        "preset": {"type": "choice", "choices": ["", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]},
+        "tune": {"type": "choice", "choices": ["", "film", "animation", "grain", "stillimage", "psnr", "ssim", "fastdecode", "zerolatency"]},
+        "profile:v": {"type": "choice", "choices": ["", "baseline", "main", "high", "high10", "high422", "high444"]},
+        "me": {"type": "choice", "choices": ["", "dia", "hex", "umh", "esa", "tesa"]},
+        "aq-mode": {"type": "choice", "choices": ["", "0", "1", "2", "3"]},
+        "cabac": {"type": "bool"},
+        "crf": {"type": "int", "min": 0, "max": 51},
+        "bframes": {"type": "int", "min": 0, "max": 16},
+        "ref": {"type": "int", "min": 1, "max": 16},
+        "keyint": {"type": "int", "min": 0, "max": 100000},
+        "min-keyint": {"type": "int", "min": 0, "max": 100000},
+        "scenecut": {"type": "int", "min": 0, "max": 100},
+        "subme": {"type": "int", "min": 0, "max": 11},
+        "aq-strength": {"type": "float", "min": 0, "max": 3},
+        "threads": {"type": "int", "min": 0, "max": 999},
+    },
+    "x265": {
+        "preset": {"type": "choice", "choices": ["", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"]},
+        "tune": {"type": "choice", "choices": ["", "psnr", "ssim", "grain", "fastdecode", "zerolatency"]},
+        "profile:v": {"type": "choice", "choices": ["", "main", "main10", "main12", "main444-8", "main444-10"]},
+        "aq-mode": {"type": "choice", "choices": ["", "0", "1", "2", "3", "4"]},
+        "sao": {"type": "bool"},
+        "crf": {"type": "int", "min": 0, "max": 51},
+        "bitrate": {"type": "int", "min": 0, "max": 1000000},
+        "bframes": {"type": "int", "min": 0, "max": 16},
+        "ref": {"type": "int", "min": 1, "max": 16},
+        "keyint": {"type": "int", "min": 0, "max": 100000},
+        "min-keyint": {"type": "int", "min": 0, "max": 100000},
+        "subme": {"type": "int", "min": 0, "max": 7},
+        "aq-strength": {"type": "float", "min": 0, "max": 3},
+        "ctu": {"type": "int", "min": 8, "max": 64},
+        "qcomp": {"type": "float", "min": 0, "max": 1},
+    },
+    "x266": {
+        "preset": {"type": "choice", "choices": ["", "faster", "fast", "medium", "slow", "slower"]},
+        "profile:v": {"type": "choice", "choices": ["", "main", "main10"]},
+        "qp": {"type": "int", "min": 0, "max": 63},
+        "gop-size": {"type": "int", "min": 0, "max": 100000},
+        "ref": {"type": "int", "min": 1, "max": 16},
+        "threads": {"type": "int", "min": 0, "max": 999},
+    },
+    "av1": {
+        "preset": {"type": "choice", "choices": ["", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]},
+        "usage": {"type": "choice", "choices": ["", "good", "realtime", "allintra"]},
+        "tune": {"type": "choice", "choices": ["", "psnr", "ssim", "vmaf"]},
+        "crf": {"type": "int", "min": 0, "max": 63},
+        "b:v": {"type": "int", "min": 0, "max": 1000000},
+        "cpu-used": {"type": "int", "min": 0, "max": 10},
+        "keyint": {"type": "int", "min": 0, "max": 100000},
+        "film-grain": {"type": "int", "min": 0, "max": 50},
+    },
+}
+
+SOFTWARE_ENCODER_FAMILIES = {
+    "x264": ["libx264"],
+    "x265": ["libx265"],
+    # libvvenc is the FFmpeg VVC backend commonly used for x266-class output.
+    "x266": ["libvvenc", "libx266"],
+    "av1": ["libsvtav1", "libaom-av1", "librav1e"],
 }
 X_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
              "medium", "slow", "slower", "veryslow"]
@@ -139,6 +243,11 @@ BUILTIN_PRESETS = (
     ]
     + [(name, {"family": fam, "rawargs": args.split()})
        for name, fam, args in RAW_PRESETS]
+    + [
+        ("VVC / x266 - libvvenc", {"family": "x266", "encoder": "libvvenc"}),
+        ("AV1 - libaom", {"family": "av1", "encoder": "libaom-av1"}),
+        ("AV1 - rav1e", {"family": "av1", "encoder": "librav1e"}),
+    ]
 )
 HW_ACCELS = {
     "None": None,
@@ -168,6 +277,8 @@ HW_INIT = {
 }
 AUDIO_CODECS = ["AAC", "MP3", "FLAC", "OGG (Vorbis)", "AC-3", "Copy"]
 AUDIO_BITRATES = ["320", "256", "224", "192", "160", "128", "96", "64", "48"]
+AUDIO_ENCODERS = ["FFmpeg", "LAME", "FAAC", "oggenc"]
+AUDIO_ENCODER_TOOLS = {"LAME": "lame", "FAAC": "faac", "oggenc": "oggenc"}
 AUDIO_DOWNMIX_PRESETS = [
     ("original", ""),
     ("mono (1)", "1"),
@@ -294,17 +405,26 @@ def find_binary(name):
 class Binaries:
     """Resolved paths for the external tools used by the application."""
 
-    def __init__(self, ffmpeg=None, ffprobe=None, ffplay=None, dovi=None):
+    def __init__(self, ffmpeg=None, ffprobe=None, ffplay=None, dovi=None,
+                 lame=None, faac=None, oggenc=None, mkvmerge=None):
         self.ffmpeg = ffmpeg or find_binary("ffmpeg")
         self.ffprobe = ffprobe or find_binary("ffprobe")
         self.ffplay = ffplay or find_binary("ffplay")
         self.dovi = dovi or find_binary("dovi_tool")
+        self.lame = lame or find_binary("lame")
+        self.faac = faac or find_binary("faac")
+        self.oggenc = oggenc or find_binary("oggenc")
+        self.mkvmerge = mkvmerge or find_binary("mkvmerge")
 
     def refresh(self):
         self.ffmpeg = find_binary("ffmpeg")
         self.ffprobe = find_binary("ffprobe")
         self.ffplay = find_binary("ffplay")
         self.dovi = find_binary("dovi_tool")
+        self.lame = find_binary("lame")
+        self.faac = find_binary("faac")
+        self.oggenc = find_binary("oggenc")
+        self.mkvmerge = find_binary("mkvmerge")
 
     def has(self, name):
         path = getattr(self, name, None)
@@ -355,7 +475,8 @@ def detect_hw_encoders(ffmpeg_bin):
                            timeout=15)
         for line in p.stdout.splitlines():
             parts = line.split()
-            if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] == "V":
+            if len(parts) >= 2 and len(parts[0]) == 6 and \
+                    parts[0][0] in "VAS":
                 compiled.add(parts[1])
     except Exception:
         return set()
@@ -368,6 +489,26 @@ def detect_hw_encoders(ffmpeg_bin):
         for encoder in candidates:
             if encoder in compiled and probe_encoder(ffmpeg_bin, encoder, accel):
                 result.add(encoder)
+    return result
+
+
+def detect_software_encoders(ffmpeg_bin):
+    """Return compiled software encoders relevant to the profile editor."""
+    wanted = {"libx264", "libx265", "libvvenc", "libx266", "libsvtav1",
+              "libaom-av1", "librav1e", "libmp3lame", "libvorbis", "aac",
+              "flac", "ac3"}
+    result = set()
+    try:
+        p = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=15)
+        for line in p.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] == "V":
+                if parts[1] in wanted:
+                    result.add(parts[1])
+    except Exception:
+        pass
     return result
 
 
