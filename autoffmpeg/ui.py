@@ -197,12 +197,12 @@ class AutoFfmpegGui(QMainWindow):
         self.tabs.addTab(self.build_avisynth_tab(), "AviSynth+")
         self.tabs.addTab(self.build_bluray_tab(), "Blu-ray")
         self.tabs.addTab(self.build_tracks_tab(), "Tracks")
-        self.tabs.addTab(self.build_mux_tab(), "Muxing")
         self.tabs.addTab(self.build_info_tab(), "Info")
         self.tabs.addTab(self.build_queue_tab(), "Queue")
         self.tabs.addTab(self.build_ffmpeg_tab(), "FFmpeg")
         self.tabs.addTab(self.build_profiles_tab(), "Profiles")
         self.tabs.addTab(self.build_encoder_options_tab(), "Encoder options")
+        self.tabs.addTab(self.build_mux_tab(), "Tools - Muxing")
         self.tabs.addTab(self.build_manual_tab(), "Manual")
         self.tabs.addTab(self.build_log_tab(), "Log")
         self.set_advanced_mode(False)
@@ -215,7 +215,7 @@ class AutoFfmpegGui(QMainWindow):
         self.connect_signals()
 
     def build_files_group(self):
-        fg = QGroupBox("Files")
+        fg = QGroupBox("Source File")
         grid = QGridLayout(fg)
         grid.addWidget(QLabel("Input:"), 0, 0)
         self.inp_input = QLineEdit()
@@ -245,7 +245,7 @@ class AutoFfmpegGui(QMainWindow):
         grid.addWidget(self.btn_bluray, 0, 8)
         self.btn_advanced = QPushButton("Advanced options")
         self.btn_advanced.setToolTip(
-            "Show expert profiles, AviSynth, Blu-ray, muxing and log tabs")
+            "Show Blu-ray, profiles, FFmpeg and log tabs")
         grid.addWidget(self.btn_advanced, 1, 7, 1, 2)
 
         grid.addWidget(QLabel("Output name:"), 1, 0)
@@ -370,6 +370,8 @@ class AutoFfmpegGui(QMainWindow):
         self.btn_cancel.clicked.connect(self.cancel_encode)
         self.btn_preview_cmd.clicked.connect(lambda: self.preview_command())
         self.btn_run_edited.clicked.connect(self.run_edited)
+        self.cmb_processor.currentIndexChanged.connect(
+            lambda *_: self.on_processor_changed())
         self.cmb_preset.currentIndexChanged.connect(self.on_preset_changed)
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
         self.cmb_hw.currentIndexChanged.connect(self.on_mode_changed)
@@ -439,12 +441,15 @@ class AutoFfmpegGui(QMainWindow):
 
     def set_advanced_mode(self, enabled):
         self.advanced_mode = bool(enabled)
-        for title in ("AviSynth+", "Blu-ray", "Muxing", "Profiles",
-                      "Encoder options", "Log"):
+        # Muxing and encoder options are part of the normal encode workflow.
+        # Only tools that are not needed for every job remain advanced.
+        for title in ("Blu-ray", "Profiles", "FFmpeg", "Log"):
             index = next((i for i in range(self.tabs.count())
                           if self.tabs.tabText(i) == title), -1)
             if index >= 0:
                 self.tabs.setTabVisible(index, self.advanced_mode)
+        self.update_avisynth_tab_visibility(
+            hasattr(self, "chk_avisynth") and self.chk_avisynth.isChecked())
         if hasattr(self, "btn_advanced"):
             self.btn_advanced.setText(
                 "Hide advanced options" if self.advanced_mode
@@ -576,6 +581,19 @@ class AutoFfmpegGui(QMainWindow):
         self.lbl_source_summary.setWordWrap(True)
         source_layout.addWidget(self.lbl_source_summary)
         left.addWidget(self.source_box)
+
+        processing_box = QGroupBox("Video processing")
+        processing_layout = QHBoxLayout(processing_box)
+        processing_layout.setContentsMargins(8, 4, 8, 4)
+        processing_layout.addWidget(QLabel("Process with:"))
+        self.cmb_processor = QComboBox()
+        self.cmb_processor.addItem("FFmpeg (filters and encoding)", "ffmpeg")
+        self.cmb_processor.addItem("AviSynth+ (script and filters)", "avisynth")
+        self.cmb_processor.setToolTip(
+            "Choose the video processing engine. AviSynth+ enables the "
+            "AviSynth+ tab with its script editor and filters.")
+        processing_layout.addWidget(self.cmb_processor, 1)
+        left.addWidget(processing_box)
         left.addWidget(vg)
 
         rg = QGroupBox("Resize / crop")
@@ -757,6 +775,13 @@ class AutoFfmpegGui(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Insert filter:"))
         self.cmb_avs_filter = QComboBox()
+        self.cmb_avs_filter.setEditable(True)
+        self.cmb_avs_filter.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cmb_avs_filter.lineEdit().setPlaceholderText(
+            "Filter name or AviSynth line")
+        self.cmb_avs_filter.setToolTip(
+            "Choose a preset or type a custom filter, for example "
+            "TemporalDegrain2 or TemporalDegrain2()")
         for name, snippet in AVS_FILTERS:
             self.cmb_avs_filter.addItem(name, snippet)
         self.btn_avs_insert_filter = QPushButton("Insert")
@@ -793,7 +818,25 @@ class AutoFfmpegGui(QMainWindow):
         return w
 
     def insert_avs_filter(self):
+        name = self.cmb_avs_filter.currentText().strip()
         snippet = self.cmb_avs_filter.currentData() or ""
+        current_index = self.cmb_avs_filter.currentIndex()
+        current_name = (self.cmb_avs_filter.itemText(current_index)
+                        if current_index >= 0 else "")
+        if name != current_name:
+            snippet = ""
+        if not snippet and name:
+            if name.startswith("src ="):
+                snippet = name
+            elif name.startswith("src."):
+                snippet = "src = " + name
+            elif "(" in name and name.endswith(")"):
+                snippet = "src = src." + name
+            else:
+                snippet = f"src = src.{name}()"
+            self.cmb_avs_filter.addItem(name, snippet)
+            self.cmb_avs_filter.setCurrentIndex(
+                self.cmb_avs_filter.count() - 1)
         if snippet:
             self.txt_avs.insertPlainText("\n" + snippet + "\n")
             self.lbl_avs_status.setText("Filter inserted")
@@ -819,7 +862,35 @@ class AutoFfmpegGui(QMainWindow):
                        self.btn_avs_preview):
             widget.setEnabled(enabled)
         self.lbl_avs_status.setText("Enabled" if enabled else "Disabled")
+        if hasattr(self, "cmb_processor"):
+            target = "avisynth" if enabled else "ffmpeg"
+            index = self.cmb_processor.findData(target)
+            if index >= 0 and self.cmb_processor.currentIndex() != index:
+                self.cmb_processor.blockSignals(True)
+                self.cmb_processor.setCurrentIndex(index)
+                self.cmb_processor.blockSignals(False)
+        self.update_avisynth_tab_visibility(enabled)
         self.schedule_command_refresh()
+
+    def update_avisynth_tab_visibility(self, enabled):
+        """Show AviSynth controls only when AviSynth is the selected engine."""
+        if not hasattr(self, "tabs"):
+            return
+        index = next((i for i in range(self.tabs.count())
+                      if self.tabs.tabText(i) == "AviSynth+"), -1)
+        if index < 0:
+            return
+        self.tabs.setTabVisible(index, bool(enabled))
+        if not enabled and self.tabs.currentIndex() == index:
+            self.tabs.setCurrentIndex(0)
+
+    def on_processor_changed(self):
+        enabled = self.cmb_processor.currentData() == "avisynth"
+        if self.chk_avisynth.isChecked() != enabled:
+            self.chk_avisynth.setChecked(enabled)
+        else:
+            self.update_avisynth_tab_visibility(enabled)
+            self.schedule_command_refresh()
 
     def choose_avs_script(self):
         f, _ = QFileDialog.getOpenFileName(
@@ -2850,7 +2921,6 @@ class AutoFfmpegGui(QMainWindow):
         self.bluray_enabled = False
         self.inp_bluray_path.clear()
         if Path(f).suffix.lower() == ".avs":
-            self.set_advanced_mode(True)
             self.chk_avisynth.setChecked(True)
             self.inp_avs_path.setText(f)
             self.load_avs_script()

@@ -24,8 +24,11 @@ class TestGuiSmoke(unittest.TestCase):
 
     def test_output_base_container_and_default_job(self):
         window = AutoFfmpegGui()
-        old_container = app_settings().value("container", "MP4")
+        settings = app_settings()
+        old_container = settings.value("container", "MP4")
+        old_avisynth = settings.value("avisynth_enabled", False, type=bool)
         try:
+            window.cmb_processor.setCurrentText("FFmpeg (filters and encoding)")
             window.cmb_container.setCurrentText("MP4")
             window.set_output_base("/tmp/gui-smoke")
             options = window.collect_options()
@@ -45,7 +48,44 @@ class TestGuiSmoke(unittest.TestCase):
         finally:
             window.close()
             self.app.processEvents()
-            app_settings().setValue("container", old_container)
+            settings.setValue("container", old_container)
+            settings.setValue("avisynth_enabled", old_avisynth)
+
+    def test_processing_engine_controls_avisynth_tab(self):
+        window = AutoFfmpegGui()
+        settings = app_settings()
+        old_avisynth = settings.value("avisynth_enabled", False, type=bool)
+
+        def tab_index(title):
+            return next(i for i in range(window.tabs.count())
+                        if window.tabs.tabText(i) == title)
+
+        try:
+            window.cmb_processor.setCurrentText("FFmpeg (filters and encoding)")
+            self.assertTrue(
+                window.tabs.isTabVisible(tab_index("Tools - Muxing")))
+            self.assertTrue(
+                window.tabs.isTabVisible(tab_index("Encoder options")))
+            self.assertLess(tab_index("Encoder options"),
+                            tab_index("Tools - Muxing"))
+            self.assertFalse(window.tabs.isTabVisible(tab_index("AviSynth+")))
+
+            window.cmb_processor.setCurrentText(
+                "AviSynth+ (script and filters)")
+            self.assertTrue(window.chk_avisynth.isChecked())
+            self.assertTrue(window.tabs.isTabVisible(tab_index("AviSynth+")))
+
+            window.cmb_avs_filter.setEditText("TemporalDegrain2")
+            window.insert_avs_filter()
+            self.assertGreaterEqual(
+                window.cmb_avs_filter.findText("TemporalDegrain2"), 0)
+            self.assertIn("src = src.TemporalDegrain2()",
+                          window.txt_avs.toPlainText())
+        finally:
+            window.cmb_processor.setCurrentText("FFmpeg (filters and encoding)")
+            window.close()
+            self.app.processEvents()
+            settings.setValue("avisynth_enabled", old_avisynth)
 
 
 if __name__ == "__main__":

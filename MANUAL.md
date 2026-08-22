@@ -18,7 +18,7 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 ## Highlights
 
 - Modern cross-platform PyQt6 interface.
-- Guided Quick Encode wizard for the common workflow, with expert options
+- Guided Quick Encode wizard for the common workflow, with specialist options
   hidden until requested.
 - Automatic `ffprobe` analysis of resolution, frame rate, duration, HDR data,
   audio tracks and subtitle tracks.
@@ -51,7 +51,8 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 - Encoding queue with live progress, FPS, speed, ETA and complete FFmpeg log.
 - Input playback and filtered preview through `ffplay`.
 - AviSynth+ tab with generated or external `.avs` scripts, FFMS2 templates,
-  plugin loading and AviSynth-aware video/audio stream mapping.
+  plugin loading, editable filter insertion and AviSynth-aware video/audio
+  stream mapping.
 - Encoder options tab for x264, x265, x266/VVC and AV1 profile overrides.
 - External audio pipelines for LAME, FAAC and `oggenc` when installed.
 - Blu-ray ISO/BDMV source selection through libbluray, including playlist,
@@ -153,7 +154,7 @@ and subtitle tracks automatically.
 
 ### Files
 
-The **Files** panel is always visible at the top of the window.
+The **Source File** panel is always visible at the top of the window.
 
 - **Input**: select the source media file with **Browse...** (or drag & drop).
 - **Play**: open the input in `ffplay` without filters.
@@ -190,8 +191,11 @@ after the elementary files and does not create a final container.
 Use **Quick wizard** for the normal workflow. It asks for the source, encoder
 profile, quality mode, audio/subtitle tracks and output in a short sequence.
 The final page applies the settings to the main window and runs the same
-preflight checks as expert mode. **Advanced options** reveals AviSynth+, Blu-ray,
-Profiles, Encoder options, Muxing and Log only when those tools are needed.
+preflight checks as expert mode. The **Video processing** selector between
+Source File and Video Encoding chooses FFmpeg or AviSynth+. Selecting
+AviSynth+ reveals its tab with the script editor, plugin paths and filter
+helpers. Muxing and Encoder options are always available; Advanced options is
+reserved for Blu-ray, profiles, binary downloads and logs.
 
 ### Blu-ray sources
 
@@ -268,6 +272,11 @@ The **AviSynth+** tab supports two workflows:
   output. The template supports `{{INPUT}}`, `{{SOURCE_FILTER}}`,
   `{{PLUGIN_LOADS}}` and `{{VIDEO_FILTERS}}`.
 - Select an existing `.avs` file to use it as the complete source.
+
+The **Insert filter** list contains common filters and is editable. Type a
+filter name such as `TemporalDegrain2`, or a complete call such as
+`TemporalDegrain2()`, then click **Insert**. Custom entries are added to the
+list for reuse during the session.
 
 When a script is generated from a normal media file, FFmpeg receives two
 inputs: AviSynth supplies the processed video and the original file supplies
@@ -370,10 +379,10 @@ injects the source Dolby Vision RPU using `dovi_tool`:
 `dovi_tool` can be downloaded from the **FFmpeg** tab. If it is missing, the
 application falls back to static HDR10 and reports this in the log.
 
-### Muxing
+### Tools - Muxing
 
-The **Muxing** tab merges separate video, audio and subtitle files into a
-single MKV (in the style of MKVToolNix GUI):
+The **Tools - Muxing** tab follows **Encoder options** and merges separate video,
+audio and subtitle files into a single MKV (in the style of MKVToolNix GUI):
 
 1. Add video, audio and subtitle files with the **Add video / audio /
    subtitle** buttons.
@@ -529,10 +538,9 @@ The status bar contains the light/dark theme button. Settings are stored in
 - Output container preference.
 - AviSynth enabled state, script template and plugin paths.
 
-Persistent advanced settings are intentionally restored on startup. If a
-previous AviSynth job should not affect a normal encode, confirm that
-**Enable AviSynth+** is off and that the generated command does not contain an
-`.avs` input.
+The selected processing engine is restored on startup. If a previous AviSynth
+job should not affect a normal encode, select **FFmpeg** in Video processing
+and confirm that the generated command does not contain an `.avs` input.
 
 ## Custom Profiles
 

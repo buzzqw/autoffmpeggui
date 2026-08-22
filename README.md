@@ -34,14 +34,15 @@ SPDX-License-Identifier: EUPL-1.2
 - NVIDIA NVENC, Intel QSV, AMD AMF, VAAPI and VideoToolbox detection (offered
   only when the hardware is actually present and working).
 - Batch processing: add a whole folder to the queue.
-- **Muxing tab**: merge video/audio/subtitle files into one MKV (mkvmerge or
-  ffmpeg stream copy) with per-track language, forced/default and delay.
+- **Tools - Muxing tab**: merge video/audio/subtitle files into one MKV
+  (mkvmerge or ffmpeg stream copy) with per-track language, forced/default and
+  delay.
 - Encoding queue with live progress, ETA, persistence and post-encode actions.
 - Editable command preview and one-off custom command execution.
 - In-app `profile.txt` editor.
 - `ffplay` playback, filtered preview and thumbnail extraction.
 - AviSynth+ script processing with FFMS2 source support, plugin paths, template
-  editor and AviSynth-aware FFmpeg command generation.
+  editor, editable filter list and AviSynth-aware FFmpeg command generation.
 - Encoder option profiles for x264, x265, VVC/x266 (`libvvenc` when available)
   and AV1 backends, including custom FFmpeg options.
 - Optional external audio pipelines using LAME, FAAC and `oggenc`.
@@ -90,6 +91,22 @@ sudo pacman -S --needed libbluray
 that ships with the Arch AviSynth+ package. The FFmpeg build must expose the
 `avisynth` demuxer; x266/VVC requires an FFmpeg build with `libvvenc` or
 `libx266`, which is not guaranteed by the standard Arch repositories.
+
+## Main Workflow
+
+The main window places the **Video processing** selector between **Source File**
+and **Video Encoding**. Choose **FFmpeg** for the normal FFmpeg filter chain, or
+choose **AviSynth+** to reveal the **AviSynth+** tab. That tab provides generated
+or external `.avs` scripts, source filters, plugin paths, filter templates and
+an editable **Insert filter** list. Type a filter name such as
+`TemporalDegrain2` or a complete call such as `TemporalDegrain2()`, then click
+**Insert** to add it to the script and the list.
+
+The **Encoder options** tab is always available for codec-specific x264, x265,
+x266/VVC and AV1 settings. The **Tools - Muxing** tab follows it and merges
+separate video, audio and subtitle files without re-encoding. Other specialist
+tools, such as Blu-ray handling, profiles, binary downloads and logs, remain
+available through **Advanced options**.
 
 ## Documentation
 
