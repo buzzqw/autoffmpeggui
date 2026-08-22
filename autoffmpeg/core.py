@@ -1563,8 +1563,69 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 # --------------------------------------------------------------------------- #
 
 
+_COPY_AUDIO_FALLBACK_KBPS = {
+    "aac": 192,
+    "ac3": 640,
+    "eac3": 768,
+    "dts": 1536,
+    "truehd": 3000,
+    "flac": 1000,
+    "mp3": 192,
+    "mp2": 192,
+    "opus": 128,
+    "vorbis": 192,
+}
+
+
+def stream_bitrate_kbps(stream: dict, fallback: float = 0.0) -> float:
+    """Read a stream bitrate from ffprobe, including BPS metadata tags."""
+    tags = stream.get("tags", {}) or {}
+    for value in (stream.get("bit_rate"), tags.get("BPS"),
+                  tags.get("BPS-eng"), tags.get("BPS-ita")):
+        try:
+            bitrate = float(value)
+        except (TypeError, ValueError):
+            continue
+        if bitrate > 0:
+            return bitrate / 1000.0
+    return float(fallback)
+
+
+def estimate_audio_bitrate_kbps(selections, tracks) -> float:
+    """Estimate the bitrate of selected output audio streams."""
+    total = 0.0
+    for row in selections or []:
+        if not row.enabled:
+            continue
+        source = tracks[row.input_index] if row.input_index < len(tracks) else {}
+        source_codec = (source.get("codec_name") or "").lower()
+        if row.codec == "Copy":
+            fallback = _COPY_AUDIO_FALLBACK_KBPS.get(source_codec, row.bitrate)
+            total += stream_bitrate_kbps(source, fallback)
+        elif row.codec == "FLAC":
+            # FLAC has no fixed target bitrate; reserve a conservative amount.
+            total += max(stream_bitrate_kbps(source), 1000.0)
+        else:
+            total += max(float(row.bitrate or 0), 0.0)
+    return total
+
+
+def estimate_subtitle_bitrate_kbps(selections, tracks) -> float:
+    """Estimate selected subtitle stream overhead for the target size."""
+    total = 0.0
+    for row in selections or []:
+        if not row.enabled or row.burn:
+            continue
+        source = tracks[row.input_index] if row.input_index < len(tracks) else {}
+        codec = (source.get("codec_name") or "").lower()
+        fallback = 256.0 if codec in BITMAP_SUB_CODECS else 8.0
+        total += stream_bitrate_kbps(source, fallback)
+    return total
+
+
 def calc_bitrate_mb(target_mb: float, duration: float,
                     audio_kbps: float) -> int:
+    """Calculate video bitrate after reserving audio/subtitle bitrate."""
     if duration <= 0:
         return 0
     video_kbps = (target_mb * 8192 / duration) * 0.95 - audio_kbps

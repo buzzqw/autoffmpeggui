@@ -77,6 +77,8 @@ from .core import (
     pb_profile_parse,
     probe_duration,
     round_by,
+    estimate_audio_bitrate_kbps,
+    estimate_subtitle_bitrate_kbps,
 )
 from .workers import (
     CropThread,
@@ -2850,16 +2852,21 @@ class AutoFfmpegGui(QMainWindow):
                                     "Open a file first to analyze it.")
             return
         mb = self.get_int(self.inp_cds, 700)
-        checked = [r for r in self.audio_rows if r["check"].isChecked()]
-        audio = sum(self.get_int(r["bitrate"], 128) for r in checked
-                    if r["codec"].currentText() != "Copy")
-        if not checked:
-            audio = 128
         options = self.collect_options()
+        audio = estimate_audio_bitrate_kbps(options.audio,
+                                            self.probe.audio_tracks)
+        subtitles = estimate_subtitle_bitrate_kbps(options.subs,
+                                                   self.probe.subtitle_tracks)
+        non_video = audio + subtitles
         duration = self.effective_video_duration(options)
-        video_kbps = calc_bitrate_mb(mb, duration, audio)
+        video_kbps = calc_bitrate_mb(mb, duration, non_video)
         self.inp_bitrate.setText(str(video_kbps))
-        self.log(f"[calc] target {mb} MB over {duration:.2f}s "
+        target_kbps = mb * 8192 / duration if duration > 0 else 0
+        if non_video >= target_kbps * 0.95:
+            self.log("[warning] target size is too small for the selected "
+                     f"audio/subtitles ({non_video:.0f} kbit/s)")
+        self.log(f"[calc] target {mb} MB over {duration:.2f}s; "
+                 f"audio {audio:.0f} + subtitles {subtitles:.0f} kbit/s "
                  f"-> video bitrate {video_kbps} kbit/s")
 
     # ------------------------------------------------------------------ #

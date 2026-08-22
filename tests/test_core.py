@@ -26,6 +26,8 @@ from autoffmpeg.core import (
     build_stream_args,
     build_video_args,
     calc_bitrate_mb,
+    estimate_audio_bitrate_kbps,
+    estimate_subtitle_bitrate_kbps,
     compute_loudnorm,
     detect_family,
     hdr_parts,
@@ -373,6 +375,23 @@ class TestBitrate(unittest.TestCase):
     def test_calc(self):
         kbps = calc_bitrate_mb(700, 3600, 192)
         self.assertGreater(kbps, 0)
+
+    def test_calc_includes_copied_audio_tracks(self):
+        selections = [AudioSelection(0, codec="Copy"),
+                      AudioSelection(1, codec="Copy"),
+                      AudioSelection(2, codec="AAC", bitrate=128)]
+        tracks = [{"codec_name": "ac3", "bit_rate": "384000"},
+                  {"codec_name": "eac3", "bit_rate": "768000"},
+                  {"codec_name": "mp2", "bit_rate": "192000"}]
+        self.assertEqual(estimate_audio_bitrate_kbps(selections, tracks),
+                         1280.0)
+
+    def test_calc_includes_unburned_subtitles(self):
+        selections = [SubtitleSelection(0), SubtitleSelection(1, burn=True)]
+        tracks = [{"codec_name": "subrip"},
+                  {"codec_name": "hdmv_pgs_subtitle"}]
+        self.assertEqual(estimate_subtitle_bitrate_kbps(selections, tracks),
+                         8.0)
 
 
 class TestCropdetect(unittest.TestCase):
