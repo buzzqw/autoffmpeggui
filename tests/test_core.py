@@ -386,12 +386,25 @@ class TestBitrate(unittest.TestCase):
         self.assertEqual(estimate_audio_bitrate_kbps(selections, tracks),
                          1280.0)
 
+    def test_calc_scales_short_audio_to_target_duration(self):
+        selections = [AudioSelection(0, codec="Copy")]
+        tracks = [{"codec_name": "ac3", "bit_rate": "384000",
+                   "_packet_duration": 10.0}]
+        self.assertAlmostEqual(
+            estimate_audio_bitrate_kbps(selections, tracks, 100.0), 38.4)
+
     def test_calc_includes_unburned_subtitles(self):
         selections = [SubtitleSelection(0), SubtitleSelection(1, burn=True)]
         tracks = [{"codec_name": "subrip"},
                   {"codec_name": "hdmv_pgs_subtitle"}]
         self.assertEqual(estimate_subtitle_bitrate_kbps(selections, tracks),
-                         8.0)
+                         0.25)
+
+    def test_calc_uses_subtitle_packet_size_over_video_duration(self):
+        selections = [SubtitleSelection(0)]
+        tracks = [{"codec_name": "subrip", "_packet_size": 216.0}]
+        self.assertAlmostEqual(
+            estimate_subtitle_bitrate_kbps(selections, tracks, 100.0), 0.01728)
 
 
 class TestCropdetect(unittest.TestCase):

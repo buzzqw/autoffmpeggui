@@ -2846,6 +2846,35 @@ class AutoFfmpegGui(QMainWindow):
             pass
         return duration
 
+    def _load_packet_stats(self, ffprobe, selector, input_args, tracks):
+        if not tracks:
+            return
+        cmd = [ffprobe, "-v", "error", "-select_streams", selector,
+               "-show_entries", "packet=stream_index,size,duration_time",
+               "-of", "json"] + input_args
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    errors="replace", timeout=120)
+            data = json.loads(result.stdout) if result.returncode == 0 else {}
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return
+        stats = {}
+        for packet in data.get("packets", []):
+            try:
+                index = int(packet.get("stream_index"))
+                size = float(packet.get("size") or 0)
+                packet_duration = float(packet.get("duration_time") or 0)
+            except (TypeError, ValueError):
+                continue
+            entry = stats.setdefault(index, {"size": 0.0, "duration": 0.0})
+            entry["size"] += max(0.0, size)
+            entry["duration"] += max(0.0, packet_duration)
+        for stream in tracks:
+            entry = stats.get(stream.get("index"))
+            if entry:
+                stream["_packet_size"] = entry["size"]
+                stream["_packet_duration"] = entry["duration"]
+
     def calc_bitrate(self):
         if not self.probe.duration:
             QMessageBox.information(self, "AutoFFmpegGui",
@@ -2853,12 +2882,21 @@ class AutoFfmpegGui(QMainWindow):
             return
         mb = self.get_int(self.inp_cds, 700)
         options = self.collect_options()
-        audio = estimate_audio_bitrate_kbps(options.audio,
-                                            self.probe.audio_tracks)
-        subtitles = estimate_subtitle_bitrate_kbps(options.subs,
-                                                   self.probe.subtitle_tracks)
-        non_video = audio + subtitles
         duration = self.effective_video_duration(options)
+        probe_input = [self.inputfile]
+        if options.bluray.enabled:
+            probe_input = (bluray_input_options(options.bluray) +
+                           [bluray_url(options.bluray)])
+        self._load_packet_stats(self.binaries.ffprobe, "a", probe_input,
+                                self.probe.audio_tracks)
+        self._load_packet_stats(self.binaries.ffprobe, "s", probe_input,
+                                self.probe.subtitle_tracks)
+        audio = estimate_audio_bitrate_kbps(options.audio,
+                                            self.probe.audio_tracks, duration)
+        subtitles = estimate_subtitle_bitrate_kbps(options.subs,
+                                                   self.probe.subtitle_tracks,
+                                                   duration)
+        non_video = audio + subtitles
         video_kbps = calc_bitrate_mb(mb, duration, non_video)
         self.inp_bitrate.setText(str(video_kbps))
         target_kbps = mb * 8192 / duration if duration > 0 else 0

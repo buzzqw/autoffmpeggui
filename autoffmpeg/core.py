@@ -1591,7 +1591,28 @@ def stream_bitrate_kbps(stream: dict, fallback: float = 0.0) -> float:
     return float(fallback)
 
 
-def estimate_audio_bitrate_kbps(selections, tracks) -> float:
+def _active_duration_factor(stream: dict, duration: float) -> float:
+    if duration <= 0:
+        return 1.0
+    try:
+        active = float(stream.get("_packet_duration") or
+                       stream.get("duration") or 0)
+    except (TypeError, ValueError):
+        active = 0.0
+    return min(1.0, active / duration) if active > 0 else 1.0
+
+
+def _measured_stream_rate(stream: dict, duration: float):
+    try:
+        packet_size = float(stream.get("_packet_size") or 0)
+    except (TypeError, ValueError):
+        packet_size = 0.0
+    if packet_size > 0 and duration > 0:
+        return packet_size * 8.0 / (duration * 1000.0)
+    return None
+
+
+def estimate_audio_bitrate_kbps(selections, tracks, duration: float = 0.0) -> float:
     """Estimate the bitrate of selected output audio streams."""
     total = 0.0
     for row in selections or []:
@@ -1601,16 +1622,24 @@ def estimate_audio_bitrate_kbps(selections, tracks) -> float:
         source_codec = (source.get("codec_name") or "").lower()
         if row.codec == "Copy":
             fallback = _COPY_AUDIO_FALLBACK_KBPS.get(source_codec, row.bitrate)
-            total += stream_bitrate_kbps(source, fallback)
+            measured = _measured_stream_rate(source, duration)
+            if measured is None:
+                rate = (stream_bitrate_kbps(source, fallback) *
+                        _active_duration_factor(source, duration))
+            else:
+                rate = measured
+            total += rate
         elif row.codec == "FLAC":
             # FLAC has no fixed target bitrate; reserve a conservative amount.
-            total += max(stream_bitrate_kbps(source), 1000.0)
+            rate = max(stream_bitrate_kbps(source), 1000.0)
+            total += rate * _active_duration_factor(source, duration)
         else:
-            total += max(float(row.bitrate or 0), 0.0)
+            rate = max(float(row.bitrate or 0), 0.0)
+            total += rate * _active_duration_factor(source, duration)
     return total
 
 
-def estimate_subtitle_bitrate_kbps(selections, tracks) -> float:
+def estimate_subtitle_bitrate_kbps(selections, tracks, duration: float = 0.0) -> float:
     """Estimate selected subtitle stream overhead for the target size."""
     total = 0.0
     for row in selections or []:
@@ -1618,8 +1647,10 @@ def estimate_subtitle_bitrate_kbps(selections, tracks) -> float:
             continue
         source = tracks[row.input_index] if row.input_index < len(tracks) else {}
         codec = (source.get("codec_name") or "").lower()
-        fallback = 256.0 if codec in BITMAP_SUB_CODECS else 8.0
-        total += stream_bitrate_kbps(source, fallback)
+        fallback = 256.0 if codec in BITMAP_SUB_CODECS else 0.25
+        measured = _measured_stream_rate(source, duration)
+        total += (measured if measured is not None else
+                  stream_bitrate_kbps(source, fallback))
     return total
 
 
