@@ -1585,11 +1585,20 @@ class AutoFfmpegGui(QMainWindow):
             pass
 
     def log(self, msg):
-        self.txt_log.appendPlainText(msg)
-        sb = self.txt_log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._append_log_line(msg)
         self.statusBar().showMessage(msg)
         self._write_log(msg)
+
+    def _append_log_line(self, text):
+        """Append a log line without interrupting upward scrolling."""
+        scrollbar = self.txt_log.verticalScrollBar()
+        old_value = scrollbar.value()
+        follow_tail = old_value >= scrollbar.maximum() - 2
+        self.txt_log.appendPlainText(text)
+        if follow_tail:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(old_value)
 
     # ------------------------------------------------------------------ #
     # Theme
@@ -2428,9 +2437,7 @@ class AutoFfmpegGui(QMainWindow):
         self.thread.start()
 
     def append_log(self, s):
-        self.txt_log.appendPlainText(s)
-        sb = self.txt_log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._append_log_line(s)
 
     def do_encode(self):
         _, jobs = self.prepare_jobs()

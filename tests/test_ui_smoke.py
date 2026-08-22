@@ -88,6 +88,23 @@ class TestGuiSmoke(unittest.TestCase):
             self.app.processEvents()
             settings.setValue("avisynth_enabled", old_avisynth)
 
+    def test_log_keeps_user_scroll_position(self):
+        window = AutoFfmpegGui()
+        try:
+            window.txt_log.setPlainText("\n".join(f"line {i}" for i in range(100)))
+            scrollbar = window.txt_log.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+            window.append_log("tail")
+            self.assertEqual(scrollbar.value(), scrollbar.maximum())
+
+            scrollbar.setValue(max(0, scrollbar.maximum() - 20))
+            old_value = scrollbar.value()
+            window.append_log("new message")
+            self.assertEqual(scrollbar.value(), old_value)
+        finally:
+            window.close()
+            self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()
