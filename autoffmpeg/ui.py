@@ -444,7 +444,7 @@ class AutoFfmpegGui(QMainWindow):
         self.advanced_mode = bool(enabled)
         # Muxing and encoder options are part of the normal encode workflow.
         # Only tools that are not needed for every job remain advanced.
-        for title in ("Blu-ray", "Profiles", "FFmpeg", "Log"):
+        for title in ("Blu-ray", "Profiles", "FFmpeg"):
             index = next((i for i in range(self.tabs.count())
                           if self.tabs.tabText(i) == title), -1)
             if index >= 0:

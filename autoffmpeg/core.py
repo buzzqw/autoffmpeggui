@@ -522,6 +522,27 @@ def input_args(plan: InputPlan) -> List[str]:
     return args
 
 
+def original_stream_plan(plan: InputPlan) -> InputPlan:
+    """Return the source-only plan used for audio and subtitle jobs.
+
+    A generated or explicit AviSynth script is a video input. Opening it for
+    an audio/subtitle-only job is unnecessary and can make those jobs fail
+    when the AviSynth runtime or one of its plugins is unavailable.
+    """
+    if len(plan.inputs) <= 1:
+        return plan
+    source_index = plan.audio_index
+    if source_index >= len(plan.inputs):
+        source_index = 0
+    return InputPlan(
+        inputs=[plan.inputs[source_index]],
+        video_index=0,
+        audio_index=0,
+        subtitle_index=0,
+        input_options={0: list(plan.input_options.get(source_index, []))},
+    )
+
+
 def stream_ref(plan: InputPlan, kind: str, index: str = "0") -> str:
     source = {"v": plan.video_index, "a": plan.audio_index,
               "s": plan.subtitle_index}[kind]
@@ -569,7 +590,9 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
                 args += [HW_QUALITY_OPT[hw], str(quality)]
             else:
                 args += ["-b:v", f"{bitrate}k"]
-            return finish(args)
+            # Profile overrides target software encoders; for example,
+            # h264_vaapi does not support the software ``-preset`` option.
+            return args
         if enc:
             log(f"[info] {enc} not available: falling back to software "
                 f"{CODECS.get(family, 'encoder')}")
@@ -677,6 +700,7 @@ def build_external_audio_jobs(options: EncodeOptions, probe: ProbeInfo,
     stem = Path(options.outputfile or options.inputfile).stem
     jobs = []
     files = []
+    source_plan = original_stream_plan(input_plan)
     for output_index, row in enumerate(selected):
         tool = (row.encoder or "ffmpeg").lower()
         if tool == "ffmpeg":
@@ -692,12 +716,12 @@ def build_external_audio_jobs(options: EncodeOptions, probe: ProbeInfo,
         tool_path = options.audio_tools.get(row.encoder,
                                             options.audio_tools.get(tool, tool))
         external[0] = tool_path
-        extract = [ffmpeg, "-hide_banner"] + input_args(input_plan)
+        extract = [ffmpeg, "-hide_banner"] + input_args(source_plan)
         if options.trim_start:
             extract += ["-ss", options.trim_start]
         if options.trim_end:
             extract += ["-to", options.trim_end]
-        extract += ["-map", f"{input_plan.audio_index}:a:{row.input_index}",
+        extract += ["-map", f"{source_plan.audio_index}:a:{row.input_index}",
                     "-vn", "-sn"]
         if row.channels in ("1", "2", "6", "8"):
             extract += ["-ac", row.channels]
@@ -759,6 +783,7 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
     measures: List[Measure] = []
     audio_maps: List[str] = []
     plan = input_plan or InputPlan(inputs=[options.inputfile])
+    source_plan = original_stream_plan(plan)
     if options.batch:
         return (["-c:a", "copy"], [], [],
                 ["-map", f"{plan.audio_index}:a?"])
@@ -807,8 +832,8 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
                 measure_cmd = [
                     binaries.ffmpeg if binaries else "ffmpeg",
                     "-hide_banner",
-                ] + input_args(plan) + [
-                    "-map", f"{plan.audio_index}:a:{row.input_index}",
+                ] + input_args(source_plan) + [
+                    "-map", f"{source_plan.audio_index}:a:{row.input_index}",
                     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
                     "-f", "null", "-",
                 ]
@@ -1212,6 +1237,7 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
     jobs.extend(external_jobs)
 
     # --- audio elementary streams ---
+    source_plan = original_stream_plan(input_plan)
     for i, row in enumerate([r for r in options.audio if r.enabled]):
         if (row.encoder or "ffmpeg").lower() != "ffmpeg":
             continue
@@ -1242,12 +1268,12 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
 
         aout = os.path.join(base_dir, f"{stem}_audio{i}{ext}")
         cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats"]
-        cmd += input_args(input_plan)
+        cmd += input_args(source_plan)
         if options.trim_start:
             cmd += ["-ss", options.trim_start]
         if options.trim_end:
             cmd += ["-to", options.trim_end]
-        cmd += ["-map", f"{input_plan.audio_index}:a:{row.input_index}"] + aargs
+        cmd += ["-map", f"{source_plan.audio_index}:a:{row.input_index}"] + aargs
         measures: List[Measure] = []
         if codec != "Copy":
             if options.gain:
@@ -1265,8 +1291,8 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
                         ":offset=__LN_OFF_0__:linear=true:print_format=summary")
                 cmd += ["-af", filt]
                 measures.append(Measure(
-                    cmd=[ffmpeg, "-hide_banner"] + input_args(input_plan) + [
-                         "-map", f"{input_plan.audio_index}:a:{row.input_index}",
+                    cmd=[ffmpeg, "-hide_banner"] + input_args(source_plan) + [
+                         "-map", f"{source_plan.audio_index}:a:{row.input_index}",
                          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:"
                                 "print_format=json",
                          "-f", "null", "-"],
@@ -1294,8 +1320,8 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
             continue
         sout = os.path.join(base_dir, f"{stem}_sub{i}{ext}")
         cmd = [ffmpeg, "-y", "-progress", "pipe:1", "-nostats"]
-        cmd += input_args(input_plan) + [
-               "-map", f"{input_plan.subtitle_index}:s:{s.input_index}",
+        cmd += input_args(source_plan) + [
+               "-map", f"{source_plan.subtitle_index}:s:{s.input_index}",
                "-vn", "-an"] + sargs + ["-f", fmt, "-y", sout]
         jobs.append(EncodeJob(f"Subtitle {i} -> {Path(sout).name}", cmd,
                               is_video=False))

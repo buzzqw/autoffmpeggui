@@ -62,6 +62,7 @@ class TestGuiSmoke(unittest.TestCase):
 
         try:
             window.cmb_processor.setCurrentText("FFmpeg (filters and encoding)")
+            self.assertTrue(window.tabs.isTabVisible(tab_index("Log")))
             self.assertTrue(
                 window.tabs.isTabVisible(tab_index("Tools - Muxing")))
             self.assertTrue(

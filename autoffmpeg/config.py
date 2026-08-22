@@ -14,7 +14,7 @@ from functools import lru_cache
 
 from PyQt6.QtCore import QSettings
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.2"
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IS_WINDOWS = os.name == "nt"

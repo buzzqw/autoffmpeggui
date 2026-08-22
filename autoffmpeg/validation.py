@@ -6,7 +6,9 @@ generating different notions of a valid job.
 """
 
 import os
+import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -25,6 +27,30 @@ class PreflightIssue:
 
 def _tool_available(path: Optional[str]) -> bool:
     return bool(path and (os.path.exists(path) or shutil.which(path)))
+
+
+def _missing_avisynth_dependency(plugin_paths):
+    """Return ``(library, plugin)`` for a missing Linux plugin dependency."""
+    if not plugin_paths or not shutil.which("ldd") or os.name != "posix":
+        return None
+    candidates = set()
+    for path in plugin_paths:
+        if not os.path.isfile(path):
+            continue
+        candidates.add(path)
+        # AviSynth+ may autoload other plugins from the same directory.
+        candidates.update(str(item) for item in Path(path).parent.glob("*.so"))
+    for plugin in sorted(candidates):
+        try:
+            result = subprocess.run(["ldd", plugin], capture_output=True,
+                                    text=True, errors="replace", timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for line in result.stdout.splitlines():
+            match = re.search(r"^\s*(\S+)\s+=>\s+not found\s*$", line)
+            if match:
+                return match.group(1), Path(plugin).name
+    return None
 
 
 def preflight(options: EncodeOptions, probe: ProbeInfo,
@@ -78,6 +104,16 @@ def preflight(options: EncodeOptions, probe: ProbeInfo,
                 "error", "missing-avs-plugin",
                 f"AviSynth plugin missing: {Path(missing[0]).name}",
                 "Install it or remove it from the plugin list."))
+        else:
+            dependency = _missing_avisynth_dependency(
+                options.avisynth.plugin_paths)
+            if dependency:
+                library, plugin = dependency
+                issues.append(PreflightIssue(
+                    "error", "missing-avs-dependency",
+                    f"AviSynth plugin {plugin} needs missing library {library}.",
+                    "Install the package providing the library or remove the "
+                    "plugin from the AviSynth directory."))
     encoders = ffmpeg_encoders or set()
     selected_encoder = (options.video_encoder or
                         options.preset.get("encoder", ""))

@@ -16,6 +16,7 @@ from autoffmpeg.core import (
     ProbeInfo,
     SubtitleSelection,
     build_audio_plan,
+    build_elementary_jobs,
     build_ffmpeg_mux_command,
     build_jobs,
     build_external_audio_jobs,
@@ -169,6 +170,14 @@ class TestVideoArgs(unittest.TestCase):
                        available_encoders={"h264_nvenc"})
         args = build_video_args(o, ProbeInfo(has_video=True))
         self.assertEqual(args, ["-c:v", "h264_nvenc", "-cq", "24"])
+
+    def test_hw_ignores_software_profile_overrides(self):
+        o = self._opts(preset={"family": "x264", "xpreset": "medium"},
+                       mode="1-pass bitrate", hw="vaapi", bitrate=786,
+                       available_encoders={"h264_vaapi"},
+                       encoder_options={"preset": "medium"})
+        args = build_video_args(o, ProbeInfo(has_video=True))
+        self.assertEqual(args, ["-c:v", "h264_vaapi", "-b:v", "786k"])
 
 
 class TestNewPresets(unittest.TestCase):
@@ -390,6 +399,36 @@ class TestJobSerialize(unittest.TestCase):
 
 
 class TestBuildJobs(unittest.TestCase):
+    def test_elementary_avs_only_opens_script_for_video(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            with open(inputfile, "wb"):
+                pass
+            output = os.path.join(td, "encoded.mkv")
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile=output, hw="vaapi",
+                preset={"family": "x264", "xpreset": "medium"},
+                mode="1-pass bitrate", bitrate=786,
+                available_encoders={"h264_vaapi"},
+                encoder_options={"preset": "medium"},
+                audio=[AudioSelection(0, codec="Copy")],
+                subs=[SubtitleSelection(0)],
+                avisynth=AvisynthOptions(enabled=True))
+            probe = ProbeInfo(
+                has_video=True, duration=1,
+                audio_tracks=[{"codec_name": "ac3"}],
+                subtitle_tracks=[{"codec_name": "subrip"}])
+            jobs = build_elementary_jobs(options, probe)
+            video = next(job for job in jobs if job.is_video)
+            streams = [job for job in jobs if not job.is_video]
+            self.assertIn("-f", video.cmd)
+            self.assertIn("avisynth", video.cmd)
+            self.assertNotIn("-preset", video.cmd)
+            self.assertEqual(len(streams), 2)
+            for job in streams:
+                self.assertNotIn("avisynth", job.cmd)
+                self.assertNotIn(".avs", " ".join(job.cmd))
+
     def test_simple_encode(self):
         with tempfile.NamedTemporaryFile(suffix=".mkv", delete=False) as fh:
             inputfile = fh.name
