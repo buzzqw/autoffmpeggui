@@ -184,3 +184,6 @@ the applicable licenses and source/build notices.
 Use the **Log** tab when reporting an issue. Include the operating system,
 selected FFmpeg paths, media information, generated command and complete error
 output.
+
+If AutoFFmpegGui is useful to you, consider supporting the project via
+[PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=azanzani@gmail.com&item_name=Support+AutoFFmpegGui+Project).
