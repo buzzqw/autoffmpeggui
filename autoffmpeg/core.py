@@ -982,30 +982,38 @@ def plan_dovi(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     hevc_path = os.path.join(tmp, f"autoffmpeg_dovi_{token}.hevc")
     rpu_path = os.path.join(tmp, f"autoffmpeg_dovi_{token}.bin")
     cleanup = [hevc_path, rpu_path]
+    if options.bluray.enabled:
+        source_input = (bluray_input_options(options.bluray) +
+                        ["-i", bluray_url(options.bluray)])
+    else:
+        source_input = ["-i", options.inputfile]
+
     pre_jobs = [
         EncodeJob("Extract HEVC elementary stream",
-                  [ffmpeg, "-y", "-i", options.inputfile, "-map", "0:v:0",
+                  [ffmpeg, "-y"] + source_input + ["-map", "0:v:0",
                    "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb",
                    "-f", "hevc", hevc_path],
                   duration=0.0, is_video=False),
-        EncodeJob("Extract Dolby Vision RPU",
-                  [dovi, "extract-rpu", hevc_path, "-o", rpu_path],
-                  duration=0.0, is_video=False),
     ]
 
+    # dovi_tool's conversion modes apply while extracting the RPU; ``convert``
+    # itself expects a complete HEVC bitstream, not the binary RPU output.
+    # Profiles 5 and 7 must be converted to an 8.1-compatible RPU for an
+    # HDR10 base layer. Profile 8 is also signalled as 8.1 for x265.
+    extract_cmd = [dovi]
+    if profile in (5, 7):
+        extract_cmd += ["--mode", "3" if profile == 5 else "2"]
+    extract_cmd += ["extract-rpu", hevc_path, "-o", rpu_path]
+    pre_jobs.append(EncodeJob(
+        "Extract Dolby Vision RPU" +
+        (" (convert to 8.1)" if profile in (5, 7) else ""),
+        extract_cmd, duration=0.0, is_video=False))
+
     final_rpu = rpu_path
-    final_profile = profile
-    if profile == 5:
-        # Profile 5 uses IPT colour; convert the RPU to 8.1 for an HDR10 base.
-        conv_path = os.path.join(tmp, f"autoffmpeg_dovi_{token}_81.bin")
-        cleanup.append(conv_path)
-        pre_jobs.append(
-            EncodeJob("Convert RPU profile 5 -> 8.1",
-                      [dovi, "convert", rpu_path, "--discard", "-o", conv_path],
-                      duration=0.0, is_video=False))
-        final_rpu = conv_path
-        final_profile = 8.1
-        log("[info] Dolby Vision profile 5: converting RPU to 8.1 (HDR10 base)")
+    final_profile = "8.1" if profile in (5, 7, 8) else str(profile)
+    if profile in (5, 7):
+        log(f"[info] Dolby Vision profile {profile}: converting RPU to 8.1 "
+            "(HDR10 base)")
 
     x265_params = [f"dolby-vision-rpu={final_rpu}",
                    f"dolby-vision-profile={final_profile}"]

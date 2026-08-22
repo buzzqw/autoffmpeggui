@@ -20,7 +20,8 @@ SPDX-License-Identifier: EUPL-1.2
 - Per-track subtitle selection, MP4 `mov_text` conversion and subtitle burn-in.
 - Resize, crop, deinterlace and automatic black-border detection.
 - HDR10, HLG, HDR10+, SDR tone mapping and Dolby Vision RPU workflows.
-- **Dolby Vision via `dovi_tool`** (RPU extraction + x265 injection).
+- **Dolby Vision via `dovi_tool`** (RPU extraction + x265 injection when a
+  Dolby Vision-enabled x265 build is installed).
 - Two-pass `loudnorm` loudness normalization.
 - Software, quality-based, bitrate and two-pass encoding modes.
 - Full stream-copy remux mode and audio-only extraction.
@@ -62,6 +63,9 @@ Requirements:
 - PyQt6.
 - FFmpeg, FFprobe and FFplay in `PATH`, or in `applications/`.
 - Optional: `dovi_tool` for Dolby Vision RPU processing.
+- Dolby Vision encoding also requires an x265/FFmpeg build supporting the
+  `dolby-vision-rpu` x265 parameter; standard x265 builds are rejected rather
+  than silently producing HDR10.
 - Optional: AviSynth+ and source plugins such as FFMS2 for script processing.
 - Optional: LAME, FAAC and `vorbis-tools` (`oggenc`) for external audio paths.
 - Optional: `mkvtoolnix-cli` for preferred MKV muxing with `mkvmerge`.

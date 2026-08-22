@@ -37,7 +37,8 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
   `cropdetect`.
 - Deinterlacing with `yadif`.
 - HDR10, HLG, HDR10+, Dolby Vision source-RPU workflows and SDR tone mapping.
-- Dolby Vision RPU processing through `dovi_tool` (extract + x265 injection).
+- Dolby Vision RPU processing through `dovi_tool` (extract + x265 injection
+  when a Dolby Vision-enabled x265 build is available).
 - HDR metadata controls for mastering display and MaxCLL/MaxFALL.
 - Two-pass `loudnorm` loudness normalization.
 - Subtitle burn-in, clip trimming, chapter and metadata preservation.
@@ -89,6 +90,11 @@ playlist source.
 If FFmpeg is not installed, use the **FFmpeg** tab inside the application. The
 download manager installs the required binaries into `applications/` and gives
 them priority over the system installation.
+
+Dolby Vision RPU encoding additionally requires an x265/FFmpeg build that
+supports the `dolby-vision-rpu` x265 parameter. A standard x265 build may
+support HDR10 but not RPU injection; AutoFFmpeg detects this and stops with an
+actionable error instead of silently producing HDR10.
 
 The automatic static-build workflow currently targets:
 
@@ -329,6 +335,8 @@ that should be included in the output.
 
 - MP4 outputs use FFmpeg's `mov_text` subtitle codec.
 - Other supported containers use subtitle stream copy where appropriate.
+- Blu-ray PGS and other bitmap subtitles cannot be stored in MP4. Select `MKV`
+  or deselect the bitmap subtitle track.
 - If no subtitle is selected, subtitles are disabled with `-sn`.
 - Tick **Burn** on a text subtitle track to hardcode it into the video.
   Bitmap subtitles (e.g. PGS) cannot be burned in this way.

@@ -49,6 +49,7 @@ from .config import (
     static_ffmpeg_source,
     static_ffplay_sources,
     default_avisynth_plugin_paths,
+    dovi_x265_supported,
     Binaries,
 )
 from .core import (
@@ -2343,7 +2344,15 @@ class AutoFfmpegGui(QMainWindow):
         options = self.collect_options()
         had_output = bool(options.output_base or options.outputfile)
         normalize_output(options, self.probe)
-        issues = preflight(options, self.probe, self.available_encoders)
+        dovi_supported = None
+        if (options.hdr_mode == "Dolby Vision (source RPU)" and
+                self.probe.source_dv and self.binaries.has("dovi")):
+            dovi_supported = dovi_x265_supported(self.binaries.ffmpeg)
+            if not dovi_supported:
+                self.log("[error] selected FFmpeg/libx265 cannot inject "
+                         "Dolby Vision RPU")
+        issues = preflight(options, self.probe, self.available_encoders,
+                           dovi_supported)
         errors = [issue for issue in issues if issue.severity == "error"]
         for issue in issues:
             prefix = issue.severity.upper()
@@ -2351,9 +2360,15 @@ class AutoFfmpegGui(QMainWindow):
                               + (f" Fix: {issue.fix}" if issue.fix else ""))
         if errors:
             if not silent:
+                details = []
+                for issue in errors:
+                    text = issue.message
+                    if issue.fix:
+                        text += f"\nFix: {issue.fix}"
+                    details.append(text)
                 QMessageBox.warning(
                     self, "Preflight failed",
-                    "\n".join(issue.message for issue in errors))
+                    "\n\n".join(details))
             return options, []
         jobs = build_jobs(options, self.probe, self.binaries,
                           self.available_encoders, log or self.log)

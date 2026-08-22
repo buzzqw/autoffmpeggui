@@ -84,12 +84,20 @@ class TestAdvancedOptions(unittest.TestCase):
                 preset={"family": "x266"},
                 audio=[AudioSelection(0, codec="OGG (Vorbis)", encoder="oggenc",
                                       bitrate=96)],
+                subs=[SubtitleSelection(0)],
                 audio_tools={"oggenc": "/missing/oggenc"})
-            issues = preflight(o, ProbeInfo(has_video=True), set())
+            issues = preflight(
+                o, ProbeInfo(has_video=True,
+                             subtitle_tracks=[{"codec_name": "hdmv_pgs_subtitle"}]),
+                set())
             codes = {issue.code for issue in issues}
             self.assertIn("missing-x266", codes)
             self.assertIn("vorbis-mp4", codes)
             self.assertIn("missing-audio-tool", codes)
+            subtitle_issue = next(issue for issue in issues
+                                  if issue.code == "bitmap-mp4")
+            self.assertIn("Blu-ray PGS subtitle track 1", subtitle_issue.message)
+            self.assertIn("Select MKV", subtitle_issue.fix)
         finally:
             os.unlink(inputfile)
 
@@ -313,6 +321,25 @@ class TestDovi(unittest.TestCase):
         finally:
             os.unlink(dovi_path)
 
+    def test_plan_dovi_converts_profiles_5_and_7_during_extraction(self):
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as fh:
+            dovi_path = fh.name
+        try:
+            for profile, mode in ((5, "3"), (7, "2")):
+                o = EncodeOptions(inputfile="/tmp/in.mkv",
+                                  hdr_mode="Dolby Vision (source RPU)",
+                                  dovi_tool=dovi_path)
+                plan = plan_dovi(o, ProbeInfo(source_dv=True,
+                                              dv_profile=profile), None)
+                extract = plan["pre_jobs"][1].cmd
+                self.assertEqual(extract[:3], [dovi_path, "--mode", mode])
+                self.assertIn("extract-rpu", extract)
+                self.assertNotIn("convert", extract)
+                self.assertIn("dolby-vision-profile=8.1",
+                              plan["x265_params"])
+        finally:
+            os.unlink(dovi_path)
+
     def test_plan_dovi_missing_tool(self):
         o = EncodeOptions(inputfile="/tmp/in.mkv",
                           hdr_mode="Dolby Vision (source RPU)",
@@ -320,6 +347,17 @@ class TestDovi(unittest.TestCase):
         probe = ProbeInfo(source_dv=True, dv_profile=8)
         plan = plan_dovi(o, probe, None)
         self.assertEqual(plan["pre_jobs"], [])
+
+    def test_preflight_rejects_dovi_without_rpu_encoder_support(self):
+        with tempfile.NamedTemporaryFile(suffix=".mkv") as source, \
+                tempfile.NamedTemporaryFile(suffix=".dovi") as dovi:
+            o = EncodeOptions(inputfile=source.name, outputfile="/tmp/out.mkv",
+                              hdr_mode="Dolby Vision (source RPU)",
+                              dovi_tool=dovi.name)
+            issues = preflight(o, ProbeInfo(has_video=True, source_dv=True),
+                               dovi_encoder_supported=False)
+            self.assertIn("unsupported-dovi-x265",
+                          {issue.code for issue in issues})
 
 
 class TestBitrate(unittest.TestCase):

@@ -9,6 +9,8 @@ import shutil
 import stat
 import subprocess
 import platform
+import tempfile
+from functools import lru_cache
 
 from PyQt6.QtCore import QSettings
 
@@ -95,6 +97,31 @@ def default_avisynth_plugin_paths():
         os.path.join(BINARY_DIR, "avisynth", "libffms2.so"),
     ]
     return [path for path in candidates if os.path.exists(path)]
+
+
+@lru_cache(maxsize=8)
+def dovi_x265_supported(ffmpeg_bin):
+    """Check whether FFmpeg's libx265 accepts external Dolby Vision RPUs.
+
+    Standard x265 accepts the profile signalling option but not the
+    ``dolby-vision-rpu`` file option used by this workflow. FFmpeg otherwise
+    only emits a warning and continues with a plain HDR10 encode, so probing
+    the option prevents a false Dolby Vision success.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".bin") as rpu:
+            cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "warning",
+                   "-f", "lavfi", "-i", "color=black:s=64x64:d=0.04",
+                   "-frames:v", "1", "-c:v", "libx265",
+                   "-pix_fmt", "yuv420p10le", "-x265-params",
+                   f"dolby-vision-rpu={rpu.name}:dolby-vision-profile=8.1",
+                   "-f", "null", "-"]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    errors="replace", timeout=30)
+        output = (result.stdout + "\n" + result.stderr).lower()
+        return "unknown option: dolby-vision-rpu" not in output
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 # --------------------------------------------------------------------------- #

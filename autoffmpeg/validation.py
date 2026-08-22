@@ -28,7 +28,7 @@ def _tool_available(path: Optional[str]) -> bool:
 
 
 def preflight(options: EncodeOptions, probe: ProbeInfo,
-              ffmpeg_encoders=None) -> List[PreflightIssue]:
+              ffmpeg_encoders=None, dovi_encoder_supported=None) -> List[PreflightIssue]:
     """Return actionable issues without starting an external process."""
     issues = []
     if options.bluray.enabled:
@@ -59,6 +59,13 @@ def preflight(options: EncodeOptions, probe: ProbeInfo,
             "error", "avisynth-remux",
             "AviSynth changes the video and cannot be used with remux-copy.",
             "Choose an encoding mode."))
+    if (options.hdr_mode == "Dolby Vision (source RPU)" and probe.source_dv and
+            options.dovi_tool and os.path.exists(options.dovi_tool) and
+            dovi_encoder_supported is False):
+        issues.append(PreflightIssue(
+            "error", "unsupported-dovi-x265",
+            "The selected FFmpeg/libx265 build cannot inject a Dolby Vision RPU.",
+            "Install a Dolby Vision-enabled x265 build or use static HDR10."))
     if options.avisynth.script_path and not os.path.exists(options.avisynth.script_path):
         issues.append(PreflightIssue(
             "error", "missing-avs",
@@ -104,19 +111,25 @@ def preflight(options: EncodeOptions, probe: ProbeInfo,
             continue
         codec = (probe.subtitle_tracks[row.input_index].get("codec_name") or "").lower()
         if row.burn and codec in BITMAP_SUB_CODECS:
+            kind = "Blu-ray PGS" if codec == "hdmv_pgs_subtitle" else "bitmap"
             issues.append(PreflightIssue(
                 "error", "bitmap-burn",
-                "Bitmap subtitles cannot be burned with the current pipeline.",
+                f"{kind} subtitle track {row.input_index + 1} cannot be "
+                "burned into the video.",
                 "Choose a text subtitle or use OCR first."))
-        if options.bluray.enabled and row.burn:
+        elif options.bluray.enabled and row.burn:
             issues.append(PreflightIssue(
                 "error", "bluray-burn",
-                "Blu-ray subtitle burn-in needs a separate OCR/source extraction step."))
+                f"Blu-ray subtitle track {row.input_index + 1} cannot be "
+                "burned into the video by this pipeline.",
+                "Choose a text subtitle or extract/OCR it first."))
         if suffix == ".mp4" and not row.burn and codec in BITMAP_SUB_CODECS:
+            kind = "Blu-ray PGS" if codec == "hdmv_pgs_subtitle" else "bitmap"
             issues.append(PreflightIssue(
                 "error", "bitmap-mp4",
-                "PGS/DVD subtitles cannot be stored in MP4.",
-                "Use MKV or deselect the bitmap subtitle."))
+                f"{kind} subtitle track {row.input_index + 1} cannot be "
+                "stored in an MP4 container.",
+                "Select MKV, or deselect this subtitle track before encoding."))
     if options.mode == "2-pass bitrate" and options.hw:
         issues.append(PreflightIssue(
             "warning", "hardware-two-pass",
