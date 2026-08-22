@@ -52,3 +52,10 @@ __pycache__/
 autoffmpeg.log
 autoffmpeg.log.old
 autoffmpeg_queue.json
+
+config.ini
+Sintel-Bluray.iso
+aaa.autoffmpeg.avs
+aaa_autoff.avs
+test_multitrack.mkv.ffindex
+test_reports/
