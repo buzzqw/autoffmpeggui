@@ -169,6 +169,16 @@ class InputPlan:
     input_options: Dict[int, List[str]] = field(default_factory=dict)
 
 
+def stream_language(stream: Optional[dict]) -> Optional[str]:
+    """Return the source stream language in a container-friendly form."""
+    stream = stream or {}
+    tags = stream.get("tags", {}) or {}
+    language = (stream.get("language") or tags.get("language") or
+                tags.get("LANGUAGE") or "")
+    language = str(language).strip().lower()
+    return language or None
+
+
 def source_path(options: "EncodeOptions") -> str:
     return bluray_url(options.bluray) if options.bluray.enabled else options.inputfile
 
@@ -858,6 +868,30 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
     return codec_args, filter_complex, measures, audio_maps
 
 
+def build_language_metadata(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
+    """Tag encoded output audio and subtitle streams with source languages."""
+    args: List[str] = []
+    selected_audio = [row for row in options.audio if row.enabled]
+    for output_index, row in enumerate(selected_audio):
+        source = (probe.audio_tracks[row.input_index]
+                  if row.input_index < len(probe.audio_tracks) else {})
+        language = stream_language(source)
+        if language:
+            args += [f"-metadata:s:a:{output_index}",
+                     f"language={language}"]
+
+    selected_subs = [row for row in options.subs
+                     if row.enabled and not row.burn]
+    for output_index, row in enumerate(selected_subs):
+        source = (probe.subtitle_tracks[row.input_index]
+                  if row.input_index < len(probe.subtitle_tracks) else {})
+        language = stream_language(source)
+        if language:
+            args += [f"-metadata:s:s:{output_index}",
+                     f"language={language}"]
+    return args
+
+
 # --------------------------------------------------------------------------- #
 # Stream mapping
 # --------------------------------------------------------------------------- #
@@ -1153,6 +1187,7 @@ def _base_cmd(options: EncodeOptions, probe: ProbeInfo, binaries,
     if filter_complex:
         cmd += ["-filter_complex", ";".join(filter_complex)]
     cmd += audio_args + sub_args + maps
+    cmd += build_language_metadata(options, probe)
     if out_is_mp4 and family != "copy":
         cmd += ["-movflags", "+faststart"]
     if options.keep_metadata:
@@ -1385,6 +1420,7 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
         cmd += aargs
         cmd += audio_maps
         cmd += ["-sn"]
+        cmd += build_language_metadata(options, probe)
         cmd += ["-y", options.outputfile]
         cleanup = script_cleanup + extra_inputs
         return external_jobs + [EncodeJob(f"Audio -> {Path(options.outputfile).name}",
@@ -1469,23 +1505,24 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     return jobs
 
 
-def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
-    """Return the raw track paths produced for an MKV encode."""
+def elementary_track_details(options: EncodeOptions, probe: ProbeInfo) -> List[dict]:
+    """Return raw track paths and source metadata for an MKV encode."""
     base_dir = os.path.dirname(options.outputfile or options.inputfile)
     stem = Path(options.outputfile or options.inputfile).stem
     family = effective_family(options, probe)
-    paths = []
+    tracks = []
     if probe.has_video and family != "copy" and options.mode != "Copy video":
         _fmt, ext = VIDEO_RAW_FORMATS.get(family, ("matroska", ".mkv"))
-        paths.append(os.path.join(base_dir, f"{stem}_video{ext}"))
+        tracks.append({"path": os.path.join(base_dir, f"{stem}_video{ext}"),
+                       "kind": "video"})
     selected = [row for row in options.audio if row.enabled]
     for output_index, row in enumerate(selected):
         tool = (row.encoder or "ffmpeg").lower()
+        src = (probe.audio_tracks[row.input_index]
+               if row.input_index < len(probe.audio_tracks) else {})
         if tool != "ffmpeg":
             ext = EXTERNAL_AUDIO_ENCODERS.get(tool, ("", ""))[1]
         elif row.codec == "Copy":
-            src = probe.audio_tracks[row.input_index] \
-                if row.input_index < len(probe.audio_tracks) else {}
             ext = SOURCE_AUDIO_FORMATS.get(
                 (src.get("codec_name") or "").lower(), ("", ""))[1]
         else:
@@ -1495,7 +1532,9 @@ def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str
                 name = f"{stem}.autoffmpeg_audio{output_index}{ext}"
             else:
                 name = f"{stem}_audio{output_index}{ext}"
-            paths.append(os.path.join(base_dir, name))
+            tracks.append({"path": os.path.join(base_dir, name),
+                           "kind": "audio",
+                           "language": stream_language(src)})
     for output_index, row in enumerate([s for s in options.subs if s.enabled]):
         if row.burn:
             continue
@@ -1508,8 +1547,16 @@ def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str
             ext = ".sup"
         else:
             continue
-        paths.append(os.path.join(base_dir, f"{stem}_sub{output_index}{ext}"))
-    return paths
+        tracks.append({"path": os.path.join(base_dir,
+                                             f"{stem}_sub{output_index}{ext}"),
+                       "kind": "subtitle",
+                       "language": stream_language(src)})
+    return tracks
+
+
+def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
+    """Return the raw track paths produced for an MKV encode."""
+    return [track["path"] for track in elementary_track_details(options, probe)]
 
 
 def build_mkv_encode_jobs(options: EncodeOptions, probe: ProbeInfo,
@@ -1526,8 +1573,8 @@ def build_mkv_encode_jobs(options: EncodeOptions, probe: ProbeInfo,
         produced.update(job.cmd)
         for command in job.pipeline:
             produced.update(command)
-    tracks = [{"path": path} for path in elementary_track_paths(options, probe)
-              if path in produced]
+    tracks = [track for track in elementary_track_details(options, probe)
+              if track["path"] in produced]
     if not tracks:
         return raw_jobs
     if binaries and binaries.has("mkvmerge"):

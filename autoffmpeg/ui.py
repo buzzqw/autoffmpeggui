@@ -79,6 +79,7 @@ from .core import (
     round_by,
     estimate_audio_bitrate_kbps,
     estimate_subtitle_bitrate_kbps,
+    stream_language,
 )
 from .workers import (
     CropThread,
@@ -129,6 +130,25 @@ def quick_duration(ffprobe, path):
         return probe_duration(data)
     except Exception:
         return 0.0
+
+
+def quick_track_language(ffprobe, path, kind):
+    """Read the first matching audio/subtitle language tag for muxing."""
+    codec_type = "subtitle" if kind == "subtitle" else kind
+    try:
+        p = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", path], capture_output=True, text=True,
+            errors="replace", timeout=10)
+        data = json.loads(p.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == codec_type:
+                language = stream_language(stream)
+                if language:
+                    return language
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        pass
+    return ""
 
 
 class AutoFfmpegGui(QMainWindow):
@@ -2675,7 +2695,7 @@ class AutoFfmpegGui(QMainWindow):
                        "jpn", "kor", "zho", "rus", "ara", "hin", "tur",
                        "pol", "nld", "swe", "dan", "fin", "ell", "heb",
                        "ces", "ron", "hun", "ukr", "bul", "hrv", "srp"])
-        lang.setEditText("")
+        lang.setEditText(quick_track_language(self.binaries.ffprobe, path, kind))
         lang.setFixedWidth(66)
         lang.setToolTip("Track language (ISO 639-2 code, e.g. ita, eng)")
         forced = QCheckBox("forced")

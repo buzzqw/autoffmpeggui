@@ -38,6 +38,7 @@ from autoffmpeg.core import (
     pb_profile_parse,
     plan_dovi,
     probe_duration,
+    stream_language,
 )
 from autoffmpeg.validation import preflight
 from autoffmpeg.bluray import (BlurayOptions, bluray_input_options,
@@ -480,6 +481,27 @@ class TestBuildJobs(unittest.TestCase):
         finally:
             os.unlink(inputfile)
 
+    def test_direct_encode_tags_audio_and_subtitle_languages(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as fh:
+            inputfile = fh.name
+        try:
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile="/tmp/tagged.mp4",
+                preset={"family": "x264", "xpreset": "medium"},
+                audio=[AudioSelection(0, codec="AAC")],
+                subs=[SubtitleSelection(0)])
+            probe = ProbeInfo(
+                has_video=True,
+                audio_tracks=[{"tags": {"language": "ita"}}],
+                subtitle_tracks=[{"tags": {"language": "eng"}}])
+            cmd = build_jobs(options, probe)[0].cmd
+            self.assertIn("-metadata:s:a:0", cmd)
+            self.assertIn("language=ita", cmd)
+            self.assertIn("-metadata:s:s:0", cmd)
+            self.assertIn("language=eng", cmd)
+        finally:
+            os.unlink(inputfile)
+
     def test_remux(self):
         with tempfile.NamedTemporaryFile(suffix=".mkv", delete=False) as fh:
             inputfile = fh.name
@@ -658,6 +680,35 @@ class TestMuxCommands(unittest.TestCase):
         self.assertIn("forced", cmd)
         self.assertIn("-c", cmd)
         self.assertIn("copy", cmd)
+
+    def test_source_language_tags_are_normalized(self):
+        self.assertEqual(stream_language(
+            {"tags": {"LANGUAGE": "ITA-IT"}}), "ita-it")
+        self.assertIsNone(stream_language({}))
+
+    def test_mkv_encode_mux_keeps_audio_and_subtitle_languages(self):
+        with tempfile.NamedTemporaryFile(suffix=".mkv", delete=False) as fh:
+            inputfile = fh.name
+        try:
+            output = os.path.join(os.path.dirname(inputfile), "tagged.mkv")
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile=output,
+                preset={"family": "x264", "xpreset": "ultrafast"},
+                audio=[AudioSelection(0, codec="AAC", bitrate=96)],
+                subs=[SubtitleSelection(0)])
+            probe = ProbeInfo(
+                has_video=True, duration=1,
+                audio_tracks=[{"codec_name": "ac3", "tags": {"language": "ita"}}],
+                subtitle_tracks=[{"codec_name": "subrip",
+                                  "tags": {"language": "eng"}}])
+            from autoffmpeg.config import Binaries
+            binaries = Binaries(ffmpeg="ffmpeg", mkvmerge="missing-mkvmerge")
+            jobs = build_jobs(options, probe, binaries)
+            cmd = jobs[-1].cmd
+            self.assertIn("language=ita", cmd)
+            self.assertIn("language=eng", cmd)
+        finally:
+            os.unlink(inputfile)
 
 
 if __name__ == "__main__":
