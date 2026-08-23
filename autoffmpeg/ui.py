@@ -397,6 +397,8 @@ class AutoFfmpegGui(QMainWindow):
             lambda *_: self.on_processor_changed())
         self.cmb_preset.currentIndexChanged.connect(self.on_preset_changed)
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
+        self.cmb_external_encoder.currentIndexChanged.connect(
+            lambda *_: self.schedule_command_refresh())
         self.cmb_hw.currentIndexChanged.connect(self.on_mode_changed)
         self.cmb_hdr.currentIndexChanged.connect(self.on_hdr_changed)
         self.btn_hdr_meta.clicked.connect(self.choose_hdr_meta)
@@ -441,7 +443,8 @@ class AutoFfmpegGui(QMainWindow):
         self.inp_avs_plugins.textChanged.connect(
             lambda *_: self.schedule_command_refresh())
         for w in (self.chk_deinterlace, self.chk_nomux, self.chk_chapters,
-                  self.chk_metadata, self.chk_resize, self.chk_normalize):
+                  self.chk_metadata, self.chk_keep_generated, self.chk_resize,
+                  self.chk_normalize):
             w.toggled.connect(lambda *_: self.schedule_command_refresh())
 
     def schedule_command_refresh(self):
@@ -493,7 +496,7 @@ class AutoFfmpegGui(QMainWindow):
         right.setSpacing(8)
 
         vg = QGroupBox("Video encoding")
-        vg.setMinimumHeight(330)
+        vg.setMinimumHeight(360)
         gl = QGridLayout(vg)
         gl.setContentsMargins(8, 8, 8, 8)
         gl.setVerticalSpacing(2)
@@ -513,42 +516,52 @@ class AutoFfmpegGui(QMainWindow):
              "Copy video", "Remux (copy all)", "Audio only"])
         gl.addWidget(self.cmb_mode, 1, 1, 1, 3)
 
-        gl.addWidget(QLabel("HW accel:"), 2, 0)
+        gl.addWidget(QLabel("Video encoder:"), 2, 0)
+        self.cmb_external_encoder = QComboBox()
+        self.cmb_external_encoder.addItem("FFmpeg (internal)", "")
+        self.cmb_external_encoder.addItem("x264 CLI (external)", "x264")
+        self.cmb_external_encoder.addItem("x265 CLI (external)", "x265")
+        self.cmb_external_encoder.setToolTip(
+            "Explicitly select an external encoder. FFmpeg/AviSynth decode "
+            "the video and pipe Y4M frames to the selected CLI encoder.")
+        gl.addWidget(self.cmb_external_encoder, 2, 1, 1, 3)
+
+        gl.addWidget(QLabel("HW accel:"), 3, 0)
         self.cmb_hw = QComboBox()
         self.cmb_hw.setToolTip(
             "Hardware accelerated encoders actually present in your ffmpeg build")
-        gl.addWidget(self.cmb_hw, 2, 1, 1, 3)
+        gl.addWidget(self.cmb_hw, 3, 1, 1, 3)
         self.populate_hw()
 
         self.lbl_quality = QLabel("Quality:")
-        gl.addWidget(self.lbl_quality, 3, 0)
+        gl.addWidget(self.lbl_quality, 4, 0)
         self.sld_quality = QSlider(Qt.Orientation.Horizontal)
         self.sld_quality.setRange(0, 51)
         self.sld_quality.setValue(23)
-        gl.addWidget(self.sld_quality, 3, 1, 1, 2)
+        gl.addWidget(self.sld_quality, 4, 1, 1, 2)
         self.spin_quality = QSpinBox()
         self.spin_quality.setRange(0, 51)
         self.spin_quality.setValue(23)
-        gl.addWidget(self.spin_quality, 3, 3)
+        gl.addWidget(self.spin_quality, 4, 3)
 
-        gl.addWidget(QLabel("Bitrate:"), 4, 0)
+        gl.addWidget(QLabel("Bitrate:"), 5, 0)
         self.inp_bitrate = QLineEdit("2000")
         self.inp_bitrate.setValidator(QIntValidator(0, 100000, self))
         self.inp_bitrate.setToolTip("Target video bitrate in kbit/s")
-        gl.addWidget(self.inp_bitrate, 4, 1)
-        gl.addWidget(QLabel("kbit/s"), 4, 2, 1, 2)
+        gl.addWidget(self.inp_bitrate, 5, 1)
+        gl.addWidget(QLabel("kbit/s"), 5, 2, 1, 2)
 
-        gl.addWidget(QLabel("Target MB:"), 5, 0)
+        gl.addWidget(QLabel("Target MB:"), 6, 0)
         self.inp_cds = QLineEdit("700")
         self.inp_cds.setValidator(QIntValidator(0, 100000, self))
         self.inp_cds.setToolTip("Desired total file size in MB")
-        gl.addWidget(self.inp_cds, 5, 1)
+        gl.addWidget(self.inp_cds, 6, 1)
         self.btn_calc = QPushButton("Calculate")
         self.btn_calc.setToolTip(
             "Compute the video bitrate from the target size and audio bitrates")
-        gl.addWidget(self.btn_calc, 5, 2, 1, 2)
+        gl.addWidget(self.btn_calc, 6, 2, 1, 2)
 
-        gl.addWidget(QLabel("FPS:"), 6, 0)
+        gl.addWidget(QLabel("FPS:"), 7, 0)
         self.cmb_framerate = QComboBox()
         self.cmb_framerate.setEditable(True)
         self.cmb_framerate.setToolTip(
@@ -557,43 +570,48 @@ class AutoFfmpegGui(QMainWindow):
             ["automatic", "23.976", "24", "25", "29.97", "30", "50",
              "59.94", "60"])
         self.cmb_framerate.setCurrentIndex(0)
-        gl.addWidget(self.cmb_framerate, 6, 1)
-        gl.addWidget(QLabel("Frames:"), 6, 2)
+        gl.addWidget(self.cmb_framerate, 7, 1)
+        gl.addWidget(QLabel("Frames:"), 7, 2)
         self.inp_vframes = QLineEdit()
         self.inp_vframes.setValidator(QIntValidator(0, 999999999, self))
         self.inp_vframes.setToolTip(
             "Maximum number of frames to encode (empty = all frames)")
-        gl.addWidget(self.inp_vframes, 6, 3)
+        gl.addWidget(self.inp_vframes, 7, 3)
 
-        gl.addWidget(QLabel("Trim:"), 7, 0)
+        gl.addWidget(QLabel("Trim:"), 8, 0)
         self.inp_trim_start = QLineEdit()
         self.inp_trim_start.setPlaceholderText("start (HH:MM:SS)")
         self.inp_trim_start.setToolTip("Start time (HH:MM:SS or seconds)")
-        gl.addWidget(self.inp_trim_start, 7, 1)
+        gl.addWidget(self.inp_trim_start, 8, 1)
         self.inp_trim_end = QLineEdit()
         self.inp_trim_end.setPlaceholderText("end (HH:MM:SS)")
         self.inp_trim_end.setToolTip("End time (HH:MM:SS or seconds)")
-        gl.addWidget(self.inp_trim_end, 7, 2, 1, 2)
+        gl.addWidget(self.inp_trim_end, 8, 2, 1, 2)
 
         self.chk_deinterlace = QCheckBox("Deinterlace (yadif)")
         self.chk_deinterlace.setToolTip("Deinterlace interlaced video (yadif)")
-        gl.addWidget(self.chk_deinterlace, 8, 0, 1, 2)
+        gl.addWidget(self.chk_deinterlace, 9, 0, 1, 2)
         self.chk_chapters = QCheckBox("Keep chapters")
         self.chk_chapters.setToolTip("Copy the chapters from the source")
-        gl.addWidget(self.chk_chapters, 8, 2)
+        gl.addWidget(self.chk_chapters, 9, 2)
         self.chk_metadata = QCheckBox("Keep metadata")
         self.chk_metadata.setToolTip("Copy the global metadata from the source")
-        gl.addWidget(self.chk_metadata, 8, 3)
+        gl.addWidget(self.chk_metadata, 9, 3)
 
         self.chk_nomux = QCheckBox("Export separate streams (no mux)")
         self.chk_nomux.setToolTip(
             "Write each stream (video, per-track audio, per-track subtitle) "
             "to its own file instead of muxing them into one container")
-        gl.addWidget(self.chk_nomux, 9, 0, 1, 4)
+        gl.addWidget(self.chk_nomux, 10, 0, 1, 4)
+        self.chk_keep_generated = QCheckBox("Keep generated stream files")
+        self.chk_keep_generated.setToolTip(
+            "Keep generated video, audio, subtitle and intermediate files in "
+            "a folder named after the input file")
+        gl.addWidget(self.chk_keep_generated, 11, 0, 1, 4)
 
         self.lbl_mode_warning = QLabel("")
         self.lbl_mode_warning.setWordWrap(True)
-        gl.addWidget(self.lbl_mode_warning, 10, 0, 1, 4)
+        gl.addWidget(self.lbl_mode_warning, 12, 0, 1, 4)
 
         self.source_box = QGroupBox("Source file")
         source_layout = QVBoxLayout(self.source_box)
@@ -2303,6 +2321,11 @@ class AutoFfmpegGui(QMainWindow):
         o.container = self.container
         o.preset = self.current_preset()
         o.mode = self.get_text(self.cmb_mode)
+        o.external_video_encoder = self.cmb_external_encoder.currentData() or ""
+        if o.external_video_encoder:
+            name = o.external_video_encoder + (".exe" if os.name == "nt" else "")
+            o.external_video_binary = shutil.which(o.external_video_encoder) or \
+                os.path.join(BINARY_DIR, name)
         o.hw = HW_ACCELS.get(self.get_text(self.cmb_hw))
         o.quality = self.sld_quality.value()
         o.bitrate = self.get_int(self.inp_bitrate, 2000)
@@ -2345,6 +2368,7 @@ class AutoFfmpegGui(QMainWindow):
         o.trim_end = self.get_text(self.inp_trim_end)
         o.keep_chapters = self.chk_chapters.isChecked()
         o.keep_metadata = self.chk_metadata.isChecked()
+        o.keep_generated_files = self.chk_keep_generated.isChecked()
         o.nomux = self.chk_nomux.isChecked()
         o.available_encoders = self.available_encoders
         o.dovi_tool = self.binaries.dovi
@@ -3154,6 +3178,7 @@ class AutoFfmpegGui(QMainWindow):
                         cmb.setCurrentIndex(idx)
         restore_combo(self.cmb_preset, "preset")
         restore_combo(self.cmb_mode, "mode")
+        restore_combo(self.cmb_external_encoder, "external_encoder")
         restore_combo(self.cmb_hw, "hw")
         restore_combo(self.cmb_hdr, "hdr")
         restore_combo(self.cmb_framerate, "framerate")
@@ -3193,6 +3218,9 @@ class AutoFfmpegGui(QMainWindow):
         if s.contains("metadata"):
             self.chk_metadata.setChecked(
                 s.value("metadata", False, type=bool))
+        if s.contains("keep_generated"):
+            self.chk_keep_generated.setChecked(
+                s.value("keep_generated", False, type=bool))
         if s.contains("avisynth_enabled"):
             self.chk_avisynth.setChecked(
                 s.value("avisynth_enabled", False, type=bool))
@@ -3243,6 +3271,7 @@ class AutoFfmpegGui(QMainWindow):
         s.setValue("lastdir", self.lastdir)
         s.setValue("preset", self.get_text(self.cmb_preset))
         s.setValue("mode", self.get_text(self.cmb_mode))
+        s.setValue("external_encoder", self.cmb_external_encoder.currentData() or "")
         s.setValue("hw", self.get_text(self.cmb_hw))
         s.setValue("hdr", self.get_text(self.cmb_hdr))
         s.setValue("after", self.get_text(self.cmb_after))
@@ -3263,6 +3292,7 @@ class AutoFfmpegGui(QMainWindow):
         s.setValue("deinterlace", self.chk_deinterlace.isChecked())
         s.setValue("chapters", self.chk_chapters.isChecked())
         s.setValue("metadata", self.chk_metadata.isChecked())
+        s.setValue("keep_generated", self.chk_keep_generated.isChecked())
         s.setValue("avisynth_enabled", self.chk_avisynth.isChecked())
         s.setValue("avisynth_source", self.get_text(self.cmb_avs_source))
         s.setValue("avisynth_filter_mode",

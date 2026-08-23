@@ -29,6 +29,9 @@ SPDX-License-Identifier: EUPL-1.2
   selector; MP4 is muxed directly by FFmpeg.
 - MKV encoding writes raw video/audio/subtitle streams first, then uses
   `mkvmerge` when available or FFmpeg stream copy as a fallback.
+- Generated elementary and intermediate files use an input-relative
+  `<input-name>.autoffmpeg/` work directory. They are removed after muxing by
+  default, or retained with **Keep generated stream files**.
 - **No-mux mode**: export video/audio/subtitle streams as separate files to
   mux them yourself (mkvmerge/mp4box/ffmpeg).
 - Clip trimming, chapter and metadata preservation.
@@ -46,6 +49,10 @@ SPDX-License-Identifier: EUPL-1.2
   editor, editable filter list and AviSynth-aware FFmpeg command generation.
 - Encoder option profiles for x264, x265, VVC/x266 (`libvvenc` when available)
   and AV1 backends, including custom FFmpeg options.
+- Optional explicit x264/x265 CLI encoding: FFmpeg or AviSynth decodes to Y4M,
+  then the selected external encoder receives the frames. Common FFmpeg
+  profile options are translated automatically; incompatible profiles use
+  FFmpeg instead.
 - Optional external audio pipelines using LAME, FAAC and `oggenc`.
 - Drag & drop files and folders onto the window.
 - Guided Quick Encode wizard with preflight validation and progressive expert

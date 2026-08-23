@@ -12,9 +12,9 @@ list of arguments (never through a shell) to avoid shell injection.
 import json
 import os
 import re
-import tempfile
+import shutil
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -183,6 +183,18 @@ def source_path(options: "EncodeOptions") -> str:
     return bluray_url(options.bluray) if options.bluray.enabled else options.inputfile
 
 
+def generated_files_dir(options: "EncodeOptions", create: bool = False) -> str:
+    """Return the per-input directory used for generated intermediate files."""
+    source = options.inputfile or options.bluray.path
+    pathname = Path(source)
+    base_dir = str(pathname.parent) if str(pathname.parent) != "." else ""
+    stem = pathname.stem or "source"
+    directory = os.path.join(base_dir, f"{stem}.autoffmpeg")
+    if create:
+        os.makedirs(directory, exist_ok=True)
+    return directory
+
+
 def source_exists(options: "EncodeOptions") -> bool:
     if options.bluray.enabled:
         return bool(options.bluray.path and os.path.exists(options.bluray.path))
@@ -255,6 +267,7 @@ class EncodeOptions:
     trim_end: str = ""
     keep_chapters: bool = False
     keep_metadata: bool = False
+    keep_generated_files: bool = False
     batch: bool = False
     nomux: bool = False
     available_encoders: set = field(default_factory=set)
@@ -264,6 +277,8 @@ class EncodeOptions:
     # {"aq-mode": "3", "psy-rd": "2.0"}. Empty values represent flags.
     encoder_options: Dict[str, str] = field(default_factory=dict)
     video_encoder: str = ""
+    external_video_encoder: str = ""
+    external_video_binary: str = ""
     audio_tools: Dict[str, str] = field(default_factory=dict)
     bluray: BlurayOptions = field(default_factory=BlurayOptions)
 
@@ -508,9 +523,13 @@ def build_input_plan(options: EncodeOptions, probe: ProbeInfo) -> InputPlan:
 
     script = build_avisynth_script(options, probe)
     if options.outputfile:
-        script_path = str(Path(options.outputfile).with_suffix(".avs"))
+        script_path = os.path.join(
+            generated_files_dir(options, create=True),
+            Path(options.outputfile).stem + ".avs")
     else:
-        script_path = str(Path(options.inputfile).with_suffix(".autoffmpeg.avs"))
+        script_path = os.path.join(
+            generated_files_dir(options, create=True),
+            Path(options.inputfile).stem + ".autoffmpeg.avs")
     try:
         Path(script_path).write_text(script, encoding="utf-8")
     except OSError:
@@ -663,6 +682,72 @@ def build_video_args(options: EncodeOptions, probe: ProbeInfo, passno: int = 0,
     return finish(["-c:v", "copy"])
 
 
+def _external_param_args(value: str) -> List[str]:
+    """Translate an FFmpeg x264/x265 parameter list to CLI options."""
+    args = []
+    for item in str(value).split(":"):
+        if not item:
+            continue
+        key, separator, parameter = item.partition("=")
+        args.append("--" + key)
+        if separator:
+            args.append(parameter)
+    return args
+
+
+def build_external_video_args(options: EncodeOptions, probe: ProbeInfo,
+                              encoder: str,
+                              log: Callable[[str], None] = lambda m: None):
+    """Adapt the selected FFmpeg profile to the x264/x265 CLI syntax."""
+    if options.mode == "2-pass bitrate":
+        log("[info] external video encoders do not use the FFmpeg two-pass "
+            "workflow; using FFmpeg for this job")
+        return None
+    family = effective_family(options, probe)
+    if family != encoder:
+        log(f"[info] profile family '{family}' cannot be used with external "
+            f"{encoder}; using FFmpeg for this job")
+        return None
+
+    ff_args = build_video_args(options, probe, log=log)
+    translated = []
+    i = 0
+    while i < len(ff_args):
+        option = ff_args[i]
+        value = ff_args[i + 1] if i + 1 < len(ff_args) else None
+        if option in ("-c:v", "-pix_fmt", "-tag:v", "-movflags"):
+            i += 2 if value is not None else 1
+            continue
+        if option in ("-x264-params", "-x265-params"):
+            if value is None:
+                return None
+            translated += _external_param_args(value)
+            i += 2
+            continue
+        mapping = {
+            "-preset": "--preset", "-tune": "--tune", "-crf": "--crf",
+            "-qp": "--qp", "-b:v": "--bitrate", "-maxrate": "--vbv-maxrate",
+            "-bufsize": "--vbv-bufsize", "-profile:v": "--profile",
+            "-level": "--level-idc", "-level:v": "--level-idc",
+            "-pass": "--pass", "-threads": "--pools",
+        }
+        if option in mapping:
+            if value is None:
+                return None
+            translated += [mapping[option], str(value).removesuffix("k")]
+            i += 2
+            continue
+        if option.startswith("-") and value is not None:
+            # Encoder option overrides use FFmpeg's option spelling, which is
+            # also the spelling used by the standalone x264/x265 tools.
+            translated += ["--" + option.lstrip("-")]
+            translated.append(str(value))
+            i += 2
+            continue
+        return None
+    return translated
+
+
 # --------------------------------------------------------------------------- #
 # Audio arguments
 # --------------------------------------------------------------------------- #
@@ -706,7 +791,7 @@ def build_external_audio_jobs(options: EncodeOptions, probe: ProbeInfo,
     """
     ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
     selected = [r for r in options.audio if r.enabled]
-    base_dir = output_dir or os.path.dirname(options.inputfile)
+    base_dir = output_dir
     stem = Path(options.outputfile or options.inputfile).stem
     jobs = []
     files = []
@@ -718,6 +803,8 @@ def build_external_audio_jobs(options: EncodeOptions, probe: ProbeInfo,
         fmt_ext = EXTERNAL_AUDIO_ENCODERS.get(tool)
         if not fmt_ext:
             continue
+        if not base_dir:
+            base_dir = generated_files_dir(options, create=True)
         codec, ext = fmt_ext
         out = os.path.join(base_dir, f"{stem}.autoffmpeg_audio{output_index}{ext}")
         external = _external_audio_args(row, out)
@@ -1037,7 +1124,7 @@ def plan_dovi(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     profile = probe.dv_profile or 8
     ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
     token = uuid.uuid4().hex[:8]
-    tmp = tempfile.gettempdir()
+    tmp = generated_files_dir(options, create=True)
     hevc_path = os.path.join(tmp, f"autoffmpeg_dovi_{token}.hevc")
     rpu_path = os.path.join(tmp, f"autoffmpeg_dovi_{token}.bin")
     cleanup = [hevc_path, rpu_path]
@@ -1210,8 +1297,9 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
     input_plan = build_input_plan(options, probe)
     script_cleanup = ([input_plan.generated_script]
                       if input_plan.generated_script and
-                      not options.avisynth.keep_generated_script else [])
-    base_dir = os.path.dirname(options.outputfile or options.inputfile)
+                      (not options.avisynth.keep_generated_script or
+                       not options.keep_generated_files) else [])
+    base_dir = generated_files_dir(options, create=True)
     stem = Path(options.outputfile or options.inputfile).stem
     jobs: List[EncodeJob] = []
 
@@ -1237,11 +1325,12 @@ def build_elementary_jobs(options: EncodeOptions, probe: ProbeInfo,
         burn = build_burn_filter(options, probe)
         if burn:
             vf.append(burn)
-        passlog = (os.path.join(tempfile.gettempdir(), "autoffmpeg2pass")
+        passlog = (os.path.join(generated_files_dir(options, create=True),
+                                "autoffmpeg2pass")
                    if mode == "2-pass bitrate" else None)
-        cleanup = list(dovi["cleanup"])
+        cleanup = [] if options.keep_generated_files else list(dovi["cleanup"])
         cleanup += script_cleanup
-        if passlog:
+        if passlog and not options.keep_generated_files:
             cleanup += [passlog + "-0.log", passlog + "-0.log.mbtree"]
 
         def vcmd(video_args):
@@ -1380,7 +1469,8 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     input_plan = build_input_plan(options, probe)
     script_cleanup = ([input_plan.generated_script]
                       if input_plan.generated_script and
-                      not options.avisynth.keep_generated_script else [])
+                      (not options.avisynth.keep_generated_script or
+                       not options.keep_generated_files) else [])
 
     # --- Remux (copy all streams) ---
     if options.mode == "Remux (copy all)":
@@ -1401,7 +1491,7 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
     if options.mode == "Audio only":
         external_jobs, external_files = build_external_audio_jobs(
             options, probe, input_plan, binaries,
-            output_dir=os.path.dirname(options.outputfile),
+            output_dir=None,
             cleanup_outputs=False)
         aargs, filter_complex, measures, audio_maps = build_audio_plan(
             options, probe, binaries, input_plan, external_files)
@@ -1422,7 +1512,10 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
         cmd += ["-sn"]
         cmd += build_language_metadata(options, probe)
         cmd += ["-y", options.outputfile]
-        cleanup = script_cleanup + extra_inputs
+        cleanup = script_cleanup + ([] if options.keep_generated_files
+                                    else extra_inputs)
+        if cleanup and not options.keep_generated_files:
+            cleanup.append(generated_files_dir(options))
         return external_jobs + [EncodeJob(f"Audio -> {Path(options.outputfile).name}",
                           cmd, probe.duration, measures=measures,
                           cleanup=cleanup, is_video=False)]
@@ -1464,12 +1557,13 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 
     external_jobs, external_files = build_external_audio_jobs(
         options, probe, input_plan, binaries,
-        output_dir=os.path.dirname(options.outputfile), cleanup_outputs=False)
+        output_dir=None, cleanup_outputs=False)
     aargs, filter_complex, measures, audio_maps = build_audio_plan(
         options, probe, binaries, input_plan, external_files)
     extra_inputs = [path for _, path in external_files]
     out_is_mp4 = Path(options.outputfile).suffix.lower() == ".mp4"
-    passlog = (os.path.join(tempfile.gettempdir(), "autoffmpeg2pass")
+    passlog = (os.path.join(generated_files_dir(options, create=True),
+                            "autoffmpeg2pass")
                if mode == "2-pass bitrate" else None)
     video_maps, sub_maps, sub_args = build_stream_args(
         options, probe, out_is_mp4, input_plan)
@@ -1482,11 +1576,14 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 
     jobs = list(dovi["pre_jobs"])
     jobs += external_jobs
-    cleanup = list(dovi["cleanup"])
+    cleanup = [] if options.keep_generated_files else list(dovi["cleanup"])
     cleanup += script_cleanup
-    cleanup += extra_inputs
-    if passlog:
+    if not options.keep_generated_files:
+        cleanup += extra_inputs
+    if passlog and not options.keep_generated_files:
         cleanup += [passlog + "-0.log", passlog + "-0.log.mbtree"]
+    if cleanup and not options.keep_generated_files:
+        cleanup.append(generated_files_dir(options))
 
     if mode == "2-pass bitrate":
         p1 = base(build_video_args(options, probe, 1, log), ["-an"])
@@ -1507,7 +1604,7 @@ def _build_direct_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
 
 def elementary_track_details(options: EncodeOptions, probe: ProbeInfo) -> List[dict]:
     """Return raw track paths and source metadata for an MKV encode."""
-    base_dir = os.path.dirname(options.outputfile or options.inputfile)
+    base_dir = generated_files_dir(options)
     stem = Path(options.outputfile or options.inputfile).stem
     family = effective_family(options, probe)
     tracks = []
@@ -1559,6 +1656,92 @@ def elementary_track_paths(options: EncodeOptions, probe: ProbeInfo) -> List[str
     return [track["path"] for track in elementary_track_details(options, probe)]
 
 
+def build_external_video_jobs(options: EncodeOptions, probe: ProbeInfo,
+                              binaries=None,
+                              available_encoders: Optional[set] = None,
+                              log: Callable[[str], None] = lambda m: None):
+    """Encode video through an explicitly selected x264/x265 CLI binary."""
+    encoder = options.external_video_encoder.lower().strip()
+    binary = options.external_video_binary or encoder
+    if not encoder or encoder not in ("x264", "x265"):
+        return None
+    if (not binary or
+            (os.path.sep in binary and not os.path.exists(binary)) or
+            (os.path.sep not in binary and not shutil.which(binary))):
+        log(f"[error] external video encoder not found: {binary or encoder}")
+        return []
+    encoder_args = build_external_video_args(options, probe, encoder, log)
+    if encoder_args is None:
+        return None
+
+    ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
+    input_plan = build_input_plan(options, probe)
+    family = effective_family(options, probe)
+    hdr = hdr_parts(options, probe, family, options.bitrate)
+    decoder = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    decoder += input_args(input_plan)
+    if options.trim_start:
+        decoder += ["-ss", options.trim_start]
+    if options.trim_end:
+        decoder += ["-to", options.trim_end]
+    decoder += ["-map", f"{input_plan.video_index}:v:0"]
+    video_filters = build_filter_args(options, probe) + hdr["vf"]
+    if video_filters:
+        decoder += ["-vf", ",".join(video_filters)]
+    if options.framerate != "automatic":
+        decoder += ["-r", options.framerate]
+    if options.vframes:
+        decoder += ["-frames:v", options.vframes]
+    decoder += ["-pix_fmt", hdr["pix"] or "yuv420p",
+                "-f", "yuv4mpegpipe", "-"]
+
+    generated = generated_files_dir(options, create=True)
+    stem = Path(options.outputfile or options.inputfile).stem
+    extension = ".h264" if encoder == "x264" else ".hevc"
+    video_path = os.path.join(generated, f"{stem}_video{extension}")
+    if encoder == "x264":
+        encode_cmd = [binary, "--demuxer", "y4m"]
+    else:
+        encode_cmd = [binary, "--y4m"]
+    encode_cmd += encoder_args + ["--output", video_path, "-"]
+    video_job = EncodeJob(f"Video -> {Path(video_path).name} ({encoder})",
+                          encode_cmd, probe.duration, is_video=True,
+                          pipeline=[decoder, encode_cmd])
+
+    # Reuse the existing per-track elementary builders for audio/subtitles,
+    # but suppress their normal FFmpeg video job.
+    audio_probe = replace(probe, has_video=False)
+    jobs = [video_job] + build_elementary_jobs(
+        options, audio_probe, binaries, available_encoders, log)
+    if options.nomux:
+        return jobs
+
+    produced = set()
+    for job in jobs:
+        produced.update(job.cmd)
+        for command in job.pipeline:
+            produced.update(command)
+    tracks = [track for track in elementary_track_details(options, probe)
+              if track["path"] in produced]
+    if not tracks:
+        return jobs
+    if (Path(options.outputfile).suffix.lower() == ".mkv" and binaries and
+            binaries.has("mkvmerge")):
+        mux_cmd = build_mkvmerge_command(tracks, options.outputfile,
+                                         binaries.mkvmerge)
+        tool = "mkvmerge"
+    else:
+        mux_cmd = build_ffmpeg_mux_command(
+            tracks, options.outputfile, binaries.ffmpeg if binaries else "ffmpeg")
+        tool = "ffmpeg"
+    cleanup = ([] if options.keep_generated_files else
+               [track["path"] for track in tracks] + [generated])
+    jobs.append(EncodeJob(
+        f"Mux -> {Path(options.outputfile).name} ({tool})", mux_cmd,
+        probe.duration, cleanup=cleanup, is_video=False))
+    return jobs
+
+
 def build_mkv_encode_jobs(options: EncodeOptions, probe: ProbeInfo,
                           binaries=None,
                           available_encoders: Optional[set] = None,
@@ -1585,7 +1768,9 @@ def build_mkv_encode_jobs(options: EncodeOptions, probe: ProbeInfo,
         cmd = build_ffmpeg_mux_command(tracks, options.outputfile,
                                        binaries.ffmpeg if binaries else "ffmpeg")
         tool = "ffmpeg"
-    cleanup = [track["path"] for track in tracks]
+    cleanup = ([] if options.keep_generated_files else
+               [track["path"] for track in tracks] +
+               [generated_files_dir(options)])
     raw_jobs.append(EncodeJob(
         f"Mux -> {Path(options.outputfile).name} ({tool})", cmd,
         probe.duration, cleanup=cleanup, is_video=False))
@@ -1596,6 +1781,13 @@ def build_jobs(options: EncodeOptions, probe: ProbeInfo, binaries=None,
                available_encoders: Optional[set] = None,
                log: Callable[[str], None] = lambda m: None) -> List[EncodeJob]:
     normalize_output(options, probe)
+    if (options.external_video_encoder and
+            options.mode not in ("Remux (copy all)", "Audio only", "Copy video") and
+            effective_family(options, probe) != "copy"):
+        external_jobs = build_external_video_jobs(
+            options, probe, binaries, available_encoders, log)
+        if external_jobs is not None:
+            return external_jobs
     if (Path(options.outputfile).suffix.lower() == ".mkv" and
             options.mode not in ("Remux (copy all)", "Audio only",
                                  "Copy video") and

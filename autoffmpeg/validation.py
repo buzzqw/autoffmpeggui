@@ -121,6 +121,19 @@ def preflight(options: EncodeOptions, probe: ProbeInfo,
         issues.append(PreflightIssue(
             "error", "missing-video-encoder",
             f"Video encoder {selected_encoder} is not available in FFmpeg."))
+    if options.external_video_encoder:
+        external = options.external_video_binary or options.external_video_encoder
+        if not _tool_available(external):
+            issues.append(PreflightIssue(
+                "error", "missing-external-video-encoder",
+                f"External video encoder {options.external_video_encoder} "
+                "is not installed.",
+                "Install it or select FFmpeg (internal)."))
+        if options.mode == "2-pass bitrate":
+            issues.append(PreflightIssue(
+                "warning", "external-two-pass-fallback",
+                "The external encoder selection is not used for FFmpeg two-pass "
+                "mode; this job will use FFmpeg."))
     if options.preset.get("family") == "x266" and not any(
             name in encoders for name in ("libvvenc", "libx266")):
         issues.append(PreflightIssue(

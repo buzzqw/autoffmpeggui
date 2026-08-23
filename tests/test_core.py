@@ -578,10 +578,11 @@ class TestBuildJobs(unittest.TestCase):
             jobs = build_jobs(o, ProbeInfo(has_video=True, duration=3))
             self.assertEqual(len(jobs), 1)
             self.assertIn("avisynth", jobs[0].cmd)
-            self.assertIn(os.path.join(td, "encoded.avs"), jobs[0].cmd)
+            generated = os.path.join(td, "source.autoffmpeg", "encoded.avs")
+            self.assertIn(generated, jobs[0].cmd)
             self.assertIn("-map", jobs[0].cmd)
             self.assertIn("0:a:0", jobs[0].cmd)
-            self.assertTrue(os.path.exists(os.path.join(td, "encoded.avs")))
+            self.assertTrue(os.path.exists(generated))
 
     def test_external_lame_is_pipeline(self):
         with tempfile.TemporaryDirectory() as td:
@@ -709,6 +710,36 @@ class TestMuxCommands(unittest.TestCase):
             self.assertIn("language=eng", cmd)
         finally:
             os.unlink(inputfile)
+
+    def test_external_x264_uses_profile_and_input_relative_workdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            open(inputfile, "wb").close()
+            output = os.path.join(td, "encoded.mkv")
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile=output,
+                preset={"family": "x264", "xpreset": "slow"}, quality=19,
+                external_video_encoder="x264", external_video_binary="/bin/true")
+            jobs = build_jobs(options, ProbeInfo(has_video=True, duration=1))
+            self.assertTrue(jobs[0].pipeline)
+            self.assertIn("yuv4mpegpipe", jobs[0].pipeline[0])
+            self.assertIn("--preset", jobs[0].pipeline[1])
+            self.assertIn("--crf", jobs[0].pipeline[1])
+            self.assertIn(os.path.join(td, "source.autoffmpeg"),
+                          " ".join(jobs[0].pipeline[1]))
+            self.assertIn(os.path.join(td, "source.autoffmpeg"),
+                          jobs[-1].cleanup)
+
+    def test_external_keep_generated_files_leaves_workdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            open(inputfile, "wb").close()
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile=os.path.join(td, "encoded.mkv"),
+                preset={"family": "x265"}, external_video_encoder="x265",
+                external_video_binary="/bin/true", keep_generated_files=True)
+            jobs = build_jobs(options, ProbeInfo(has_video=True, duration=1))
+            self.assertEqual(jobs[-1].cleanup, [])
 
 
 if __name__ == "__main__":
