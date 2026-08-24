@@ -697,19 +697,19 @@ def _external_param_args(value: str) -> List[str]:
 
 def build_external_video_args(options: EncodeOptions, probe: ProbeInfo,
                               encoder: str,
+                              passno: int = 0,
                               log: Callable[[str], None] = lambda m: None):
     """Adapt the selected FFmpeg profile to the x264/x265 CLI syntax."""
-    if options.mode == "2-pass bitrate":
-        log("[info] external video encoders do not use the FFmpeg two-pass "
-            "workflow; using FFmpeg for this job")
-        return None
     family = effective_family(options, probe)
-    if family != encoder:
-        log(f"[info] profile family '{family}' cannot be used with external "
+    if family not in ("x264", "x265"):
+        log(f"[info] profile family '{family}' cannot be adapted to external "
             f"{encoder}; using FFmpeg for this job")
         return None
+    if family != encoder:
+        log(f"[info] adapting {family} profile to explicitly selected "
+            f"external {encoder}")
 
-    ff_args = build_video_args(options, probe, log=log)
+    ff_args = build_video_args(options, probe, passno=passno, log=log)
     translated = []
     i = 0
     while i < len(ff_args):
@@ -721,7 +721,12 @@ def build_external_video_args(options: EncodeOptions, probe: ProbeInfo,
         if option in ("-x264-params", "-x265-params"):
             if value is None:
                 return None
-            translated += _external_param_args(value)
+            source_encoder = option[1:5]
+            if source_encoder == encoder:
+                translated += _external_param_args(value)
+            else:
+                log(f"[info] skipping {option} while adapting the profile "
+                    f"to {encoder}")
             i += 2
             continue
         mapping = {
@@ -745,6 +750,9 @@ def build_external_video_args(options: EncodeOptions, probe: ProbeInfo,
             i += 2
             continue
         return None
+    if options.mode == "2-pass bitrate" and not any(
+            translated[i] == "--pass" for i in range(len(translated))):
+        translated += ["--pass", str(passno)]
     return translated
 
 
@@ -1670,9 +1678,10 @@ def build_external_video_jobs(options: EncodeOptions, probe: ProbeInfo,
             (os.path.sep not in binary and not shutil.which(binary))):
         log(f"[error] external video encoder not found: {binary or encoder}")
         return []
-    encoder_args = build_external_video_args(options, probe, encoder, log)
-    if encoder_args is None:
-        return None
+    if options.mode == "2-pass bitrate":
+        passnos = (1, 2)
+    else:
+        passnos = (0,)
 
     ffmpeg = binaries.ffmpeg if binaries else "ffmpeg"
     input_plan = build_input_plan(options, probe)
@@ -1699,19 +1708,31 @@ def build_external_video_jobs(options: EncodeOptions, probe: ProbeInfo,
     stem = Path(options.outputfile or options.inputfile).stem
     extension = ".h264" if encoder == "x264" else ".hevc"
     video_path = os.path.join(generated, f"{stem}_video{extension}")
-    if encoder == "x264":
-        encode_cmd = [binary, "--demuxer", "y4m"]
-    else:
-        encode_cmd = [binary, "--y4m"]
-    encode_cmd += encoder_args + ["--output", video_path, "-"]
-    video_job = EncodeJob(f"Video -> {Path(video_path).name} ({encoder})",
-                          encode_cmd, probe.duration, is_video=True,
-                          pipeline=[decoder, encode_cmd])
+    passlog = os.path.join(generated, "autoffmpeg2pass")
+    video_jobs = []
+    for passno in passnos:
+        encoder_args = build_external_video_args(
+            options, probe, encoder, passno=passno, log=log)
+        if encoder_args is None:
+            return None
+        if encoder == "x264":
+            encode_cmd = [binary, "--demuxer", "y4m"]
+        else:
+            encode_cmd = [binary, "--y4m"]
+        output = (os.devnull if passno == 1 else video_path)
+        if passno:
+            encode_cmd += ["--stats", passlog]
+        encode_cmd += encoder_args + ["--output", output, "-"]
+        label = (f"Video pass {passno} -> {Path(video_path).name} ({encoder})"
+                 if passno else f"Video -> {Path(video_path).name} ({encoder})")
+        video_jobs.append(EncodeJob(
+            label, encode_cmd, probe.duration, is_video=True,
+            pipeline=[decoder, encode_cmd]))
 
     # Reuse the existing per-track elementary builders for audio/subtitles,
     # but suppress their normal FFmpeg video job.
     audio_probe = replace(probe, has_video=False)
-    jobs = [video_job] + build_elementary_jobs(
+    jobs = video_jobs + build_elementary_jobs(
         options, audio_probe, binaries, available_encoders, log)
     if options.nomux:
         return jobs

@@ -741,6 +741,23 @@ class TestMuxCommands(unittest.TestCase):
             jobs = build_jobs(options, ProbeInfo(has_video=True, duration=1))
             self.assertEqual(jobs[-1].cleanup, [])
 
+    def test_selected_x264_overrides_x265_profile_and_uses_two_pass_cli(self):
+        with tempfile.TemporaryDirectory() as td:
+            inputfile = os.path.join(td, "source.mkv")
+            open(inputfile, "wb").close()
+            options = EncodeOptions(
+                inputfile=inputfile, outputfile=os.path.join(td, "encoded.mkv"),
+                preset={"family": "x265", "xpreset": "faster"},
+                mode="2-pass bitrate", bitrate=500,
+                external_video_encoder="x264", external_video_binary="/bin/true")
+            jobs = build_jobs(options, ProbeInfo(has_video=True, duration=1))
+            self.assertEqual(len([job for job in jobs if job.is_video]), 2)
+            self.assertEqual(jobs[0].pipeline[1][0], "/bin/true")
+            self.assertIn("--pass", jobs[0].pipeline[1])
+            self.assertIn("--pass", jobs[1].pipeline[1])
+            self.assertIn("--output", jobs[1].pipeline[1])
+            self.assertNotIn("libx265", jobs[0].pipeline[1])
+
 
 if __name__ == "__main__":
     unittest.main()
