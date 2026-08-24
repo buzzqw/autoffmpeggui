@@ -73,6 +73,11 @@ class TestAdvancedOptions(unittest.TestCase):
         self.assertIn("qp", encoder_option_catalog("x266"))
         self.assertIn("crf", encoder_option_catalog("av1"))
 
+    def test_encoder_catalog_has_guided_codec_families(self):
+        for family in ("x264", "x265", "av1", "vp9", "xvid", "mpeg4",
+                       "mpeg2", "wmv", "prores", "dnxhd", "ffv1"):
+            self.assertTrue(encoder_option_catalog(family), family)
+
     def test_probe_duration_frame_fallback(self):
         data = {"format": {"duration": "N/A"}, "streams": [
             {"codec_type": "video", "nb_frames": "50",
@@ -695,8 +700,9 @@ class TestMuxCommands(unittest.TestCase):
             options = EncodeOptions(
                 inputfile=inputfile, outputfile=output,
                 preset={"family": "x264", "xpreset": "ultrafast"},
-                audio=[AudioSelection(0, codec="AAC", bitrate=96)],
-                subs=[SubtitleSelection(0)])
+                audio=[AudioSelection(0, codec="AAC", bitrate=96,
+                                      language="eng")],
+                subs=[SubtitleSelection(0, language="ita")])
             probe = ProbeInfo(
                 has_video=True, duration=1,
                 audio_tracks=[{"codec_name": "ac3", "tags": {"language": "ita"}}],
@@ -706,8 +712,10 @@ class TestMuxCommands(unittest.TestCase):
             binaries = Binaries(ffmpeg="ffmpeg", mkvmerge="missing-mkvmerge")
             jobs = build_jobs(options, probe, binaries)
             cmd = jobs[-1].cmd
-            self.assertIn("language=ita", cmd)
-            self.assertIn("language=eng", cmd)
+            audio_tag = cmd.index("-metadata:s:1")
+            sub_tag = cmd.index("-metadata:s:2")
+            self.assertEqual(cmd[audio_tag + 1], "language=eng")
+            self.assertEqual(cmd[sub_tag + 1], "language=ita")
         finally:
             os.unlink(inputfile)
 

@@ -135,6 +135,7 @@ class AudioSelection:
     sampling: str = "auto"
     encoder: str = "ffmpeg"
     encoder_options: Dict[str, str] = field(default_factory=dict)
+    language: Optional[str] = None
 
 
 @dataclass
@@ -142,6 +143,7 @@ class SubtitleSelection:
     input_index: int
     enabled: bool = True
     burn: bool = False
+    language: Optional[str] = None
 
 
 @dataclass
@@ -963,6 +965,12 @@ def build_audio_plan(options: EncodeOptions, probe: ProbeInfo,
     return codec_args, filter_complex, measures, audio_maps
 
 
+def selection_language(row, source: Optional[dict]) -> Optional[str]:
+    """Return a user override, falling back to the source stream tag."""
+    override = str(getattr(row, "language", "") or "").strip().lower()
+    return override or stream_language(source)
+
+
 def build_language_metadata(options: EncodeOptions, probe: ProbeInfo) -> List[str]:
     """Tag encoded output audio and subtitle streams with source languages."""
     args: List[str] = []
@@ -970,7 +978,7 @@ def build_language_metadata(options: EncodeOptions, probe: ProbeInfo) -> List[st
     for output_index, row in enumerate(selected_audio):
         source = (probe.audio_tracks[row.input_index]
                   if row.input_index < len(probe.audio_tracks) else {})
-        language = stream_language(source)
+        language = selection_language(row, source)
         if language:
             args += [f"-metadata:s:a:{output_index}",
                      f"language={language}"]
@@ -980,7 +988,7 @@ def build_language_metadata(options: EncodeOptions, probe: ProbeInfo) -> List[st
     for output_index, row in enumerate(selected_subs):
         source = (probe.subtitle_tracks[row.input_index]
                   if row.input_index < len(probe.subtitle_tracks) else {})
-        language = stream_language(source)
+        language = selection_language(row, source)
         if language:
             args += [f"-metadata:s:s:{output_index}",
                      f"language={language}"]
@@ -1639,7 +1647,7 @@ def elementary_track_details(options: EncodeOptions, probe: ProbeInfo) -> List[d
                 name = f"{stem}_audio{output_index}{ext}"
             tracks.append({"path": os.path.join(base_dir, name),
                            "kind": "audio",
-                           "language": stream_language(src)})
+                           "language": selection_language(row, src)})
     for output_index, row in enumerate([s for s in options.subs if s.enabled]):
         if row.burn:
             continue
@@ -1655,7 +1663,7 @@ def elementary_track_details(options: EncodeOptions, probe: ProbeInfo) -> List[d
         tracks.append({"path": os.path.join(base_dir,
                                              f"{stem}_sub{output_index}{ext}"),
                        "kind": "subtitle",
-                       "language": stream_language(src)})
+                       "language": selection_language(row, src)})
     return tracks
 
 

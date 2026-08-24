@@ -99,6 +99,12 @@ CHANNEL_CHOICES = [
     ("5.1 (6)", "6"),
     ("7.1 (8)", "8"),
 ]
+
+TRACK_LANGUAGE_CODES = [
+    "", "und", "ita", "eng", "fra", "deu", "spa", "por", "jpn", "kor",
+    "zho", "rus", "ara", "hin", "tur", "pol", "nld", "swe", "dan",
+    "fin", "ell", "heb", "ces", "ron", "hun", "ukr", "bul", "hrv", "srp",
+]
 POST_ACTIONS = ["None", "Notify when done", "Open output folder", "Shut down"]
 AVS_FILTERS = [
     ("FFVideoSource", 'src = FFVideoSource("{{INPUT}}")'),
@@ -1094,14 +1100,17 @@ class AutoFfmpegGui(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         info = QLabel(
-            "Options are attached to the selected video profile. Empty rows are "
-            "ignored; custom option names are accepted for newer encoder builds.")
+            "Configure codec-specific options like MeGUI/StaxRip. Empty values "
+            "keep defaults; unsupported options are disabled for the selected "
+            "external encoder. The custom row accepts any FFmpeg option.")
         info.setWordWrap(True)
         lay.addWidget(info)
         row = QHBoxLayout()
         row.addWidget(QLabel("Profile family:"))
         self.cmb_encoder_family = QComboBox()
-        self.cmb_encoder_family.addItems(["x264", "x265", "x266", "av1"])
+        self.cmb_encoder_family.addItems(
+            ["x264", "x265", "x266", "av1", "vp9", "xvid", "mpeg4",
+             "mpeg2", "wmv", "prores", "dnxhd", "ffv1"])
         self.cmb_encoder_family.setEnabled(False)
         self.cmb_encoder_family.setToolTip(
             "Selected automatically from the active video profile")
@@ -1112,15 +1121,17 @@ class AutoFfmpegGui(QMainWindow):
         row.addWidget(self.btn_encoder_clear)
         row.addStretch(1)
         lay.addLayout(row)
-        self.tbl_encoder_options = QTableWidget(0, 3)
+        self.tbl_encoder_options = QTableWidget(0, 4)
         self.tbl_encoder_options.setHorizontalHeaderLabels(
-            ["Option", "Value", "Description"])
+            ["Group", "Option", "Value", "Description"])
         self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch)
         self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch)
+        self.tbl_encoder_options.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch)
         self.tbl_encoder_options.setToolTip(
             "FFmpeg encoder options without the leading dash")
         lay.addWidget(self.tbl_encoder_options, 1)
@@ -1151,24 +1162,65 @@ class AutoFfmpegGui(QMainWindow):
         for key, hint in catalog.items():
             row = self.tbl_encoder_options.rowCount()
             self.tbl_encoder_options.insertRow(row)
-            self.tbl_encoder_options.setItem(row, 0, QTableWidgetItem(key))
             spec = ENCODER_OPTION_SPECS.get(family, {}).get(key, {})
-            self.tbl_encoder_options.setCellWidget(
-                row, 1, self.encoder_option_widget(
-                    spec, current.get(key, "")))
             self.tbl_encoder_options.setItem(
-                row, 2, QTableWidgetItem(
+                row, 0, QTableWidgetItem(self.encoder_option_group(key)))
+            self.tbl_encoder_options.setItem(row, 1, QTableWidgetItem(key))
+            widget = self.encoder_option_widget(
+                spec, current.get(key, ""))
+            external = self.cmb_external_encoder.currentData() or ""
+            unsupported = ((external and spec.get("ffmpeg_only")) or
+                           (not external and spec.get("external_only")))
+            if unsupported:
+                widget.setEnabled(False)
+                if external:
+                    widget.setToolTip(
+                        "FFmpeg-only option; disabled for external " + external)
+                else:
+                    widget.setToolTip(
+                        "External-encoder option; disabled for FFmpeg")
+            self.tbl_encoder_options.setCellWidget(
+                row, 2, widget)
+            self.tbl_encoder_options.setItem(
+                row, 3, QTableWidgetItem(
                     self.encoder_option_help(key, hint)))
         self.tbl_encoder_options.insertRow(self.tbl_encoder_options.rowCount())
         row = self.tbl_encoder_options.rowCount() - 1
+        self.tbl_encoder_options.setItem(row, 0, QTableWidgetItem("Advanced"))
         custom_key = QTableWidgetItem("custom-option")
         custom_key.setToolTip("Replace this name with any FFmpeg option")
-        self.tbl_encoder_options.setItem(row, 0, custom_key)
+        self.tbl_encoder_options.setItem(row, 1, custom_key)
         custom_value = QLineEdit()
         custom_value.setPlaceholderText("value")
         custom_value.textChanged.connect(lambda *_: self.schedule_command_refresh())
-        self.tbl_encoder_options.setCellWidget(row, 1, custom_value)
-        self.tbl_encoder_options.setItem(row, 2, QTableWidgetItem("Add any FFmpeg option"))
+        self.tbl_encoder_options.setCellWidget(row, 2, custom_value)
+        self.tbl_encoder_options.setItem(row, 3, QTableWidgetItem("Add any FFmpeg option"))
+
+    def encoder_option_group(self, key):
+        groups = {
+            "rate": {"crf", "qp", "b:v", "bitrate", "maxrate", "bufsize",
+                     "qmin", "qmax", "qscale:v", "aq-mode", "aq-strength",
+                     "qcomp", "cplxblur", "psy-rd", "psy-rdoq", "cutree",
+                     "qpmin", "qpmax", "qpstep", "ratetol", "ipratio", "pbratio"},
+            "gop": {"g", "keyint", "min-keyint", "keyint_min", "bf", "bframes",
+                    "b-bias", "b-pyramid", "b_strategy", "scenecut", "sc_threshold",
+                    "b-adapt", "b-intra", "forced-idr", "open-gop"},
+            "analysis": {"me", "me_method", "motion-est", "subme", "subq", "rd",
+                          "ref", "refs", "mixed-refs", "partitions", "direct-pred",
+                          "rect", "amp", "limit-refs", "limit-modes", "early-skip",
+                          "rskip", "rdoq-level", "trellis", "mbd", "fast-pskip"},
+            "quality": {"psy", "8x8dct", "weightb", "weightp", "deblock", "sao",
+                        "ctu", "min-cu-size", "tu-intra-depth", "tu-inter-depth",
+                        "chromaoffset", "coder", "intra_vlc", "context"},
+            "performance": {"preset", "tune", "threads", "frame-threads", "wpp",
+                             "row-mt", "pmode", "pme", "cpu-used", "deadline"},
+            "compatibility": {"profile:v", "profile", "level", "level-idc", "vtag",
+                               "nal-hrd", "aud", "slice-max-size", "vendor", "alpha_bits"},
+            "advanced": {"x264-params", "x265-params", "svtav1-params", "stats",
+                         "x265-stats", "passlogfile", "fastfirstpass", "noise_reduction"},
+        }
+        return next((name.title() for name, keys in groups.items() if key in keys),
+                    "Advanced")
 
     def encoder_option_help(self, key, hint):
         help_text = {
@@ -1232,7 +1284,7 @@ class AutoFfmpegGui(QMainWindow):
 
     def clear_encoder_overrides(self):
         for row in range(self.tbl_encoder_options.rowCount()):
-            widget = self.tbl_encoder_options.cellWidget(row, 1)
+            widget = self.tbl_encoder_options.cellWidget(row, 2)
             if isinstance(widget, QComboBox):
                 idx = widget.findData("")
                 if idx >= 0:
@@ -1243,12 +1295,14 @@ class AutoFfmpegGui(QMainWindow):
                 widget.clear()
         self.schedule_command_refresh()
 
-    def encoder_options_from_table(self):
+    def encoder_options_from_table(self, include_disabled=False):
         values = {}
         for row in range(self.tbl_encoder_options.rowCount()):
-            key = self.tbl_encoder_options.item(row, 0)
-            widget = self.tbl_encoder_options.cellWidget(row, 1)
+            key = self.tbl_encoder_options.item(row, 1)
+            widget = self.tbl_encoder_options.cellWidget(row, 2)
             if not key or not widget or not key.text().strip():
+                continue
+            if not include_disabled and not widget.isEnabled():
                 continue
             value = ""
             if isinstance(widget, QComboBox):
@@ -1271,7 +1325,8 @@ class AutoFfmpegGui(QMainWindow):
         info = QLabel(
             "Select the audio and subtitle tracks to keep. For each audio "
             "track you can choose the codec, bitrate, channels and sampling "
-            "rate; copy leaves the stream untouched.")
+            "rate plus its language tag; copy leaves the stream untouched. "
+            "The detected language is prefilled and can be overridden.")
         info.setWordWrap(True)
         lay.addWidget(info)
 
@@ -1863,7 +1918,16 @@ class AutoFfmpegGui(QMainWindow):
         channels.setEnabled(not is_copy)
         sampling.setEnabled(not is_copy)
 
-    def add_audio_row(self, stream_index, label):
+    def make_language_combo(self, language=""):
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItems(TRACK_LANGUAGE_CODES)
+        combo.setEditText((language or "").strip().lower())
+        combo.setFixedWidth(66)
+        combo.setToolTip("Track language (ISO 639-2 code, e.g. ita, eng)")
+        return combo
+
+    def add_audio_row(self, stream_index, label, language=""):
         item = QListWidgetItem(self.audio_list)
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -1873,6 +1937,7 @@ class AutoFfmpegGui(QMainWindow):
         check.setChecked(True)
         check.setToolTip("Include this audio track")
         text = QLabel(label)
+        lang = self.make_language_combo(language)
         codec = QComboBox()
         codec.addItems(AUDIO_CODECS)
         codec.setToolTip("Encoding for this audio track")
@@ -1903,6 +1968,8 @@ class AutoFfmpegGui(QMainWindow):
         sampling.setFixedWidth(78)
         layout.addWidget(check)
         layout.addWidget(text, 1)
+        layout.addWidget(QLabel("lang"))
+        layout.addWidget(lang)
         layout.addWidget(codec)
         layout.addWidget(encoder)
         layout.addWidget(encoder_options)
@@ -1914,6 +1981,7 @@ class AutoFfmpegGui(QMainWindow):
         self.audio_rows.append({
             "input_index": stream_index,
             "check": check,
+            "lang": lang,
             "codec": codec,
             "encoder": encoder,
             "encoder_options": encoder_options,
@@ -1931,6 +1999,8 @@ class AutoFfmpegGui(QMainWindow):
         bitrate.currentTextChanged.connect(
             lambda *_: self.schedule_command_refresh())
         sampling.currentTextChanged.connect(
+            lambda *_: self.schedule_command_refresh())
+        lang.currentTextChanged.connect(
             lambda *_: self.schedule_command_refresh())
         encoder.currentIndexChanged.connect(
             lambda *_: self.on_audio_encoder_changed(
@@ -1951,7 +2021,7 @@ class AutoFfmpegGui(QMainWindow):
         self._update_audio_row_enabled(codec, bitrate, channels, sampling)
         self.schedule_command_refresh()
 
-    def add_subtitle_row(self, stream_index, label):
+    def add_subtitle_row(self, stream_index, label, language=""):
         item = QListWidgetItem(self.subtitle_list)
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -1959,16 +2029,20 @@ class AutoFfmpegGui(QMainWindow):
         check = QCheckBox()
         check.setChecked(True)
         check.setToolTip("Include this subtitle track")
+        lang = self.make_language_combo(language)
         burn = QCheckBox("Burn")
         burn.setToolTip("Burn this subtitle into the video (text subs only)")
         layout.addWidget(check)
         layout.addWidget(QLabel(label), 1)
+        layout.addWidget(QLabel("lang"))
+        layout.addWidget(lang)
         layout.addWidget(burn)
         item.setSizeHint(row.sizeHint())
         self.subtitle_list.setItemWidget(item, row)
         self.subtitle_rows.append({"input_index": stream_index, "check": check,
-                                   "burn": burn})
+                                   "lang": lang, "burn": burn})
         check.toggled.connect(lambda *_: self.schedule_command_refresh())
+        lang.currentTextChanged.connect(lambda *_: self.schedule_command_refresh())
         burn.toggled.connect(lambda *_: self.schedule_command_refresh())
 
     def update_track_heights(self):
@@ -2091,7 +2165,7 @@ class AutoFfmpegGui(QMainWindow):
                     label += f"  [{lang_name(lang)}]"
                 if title:
                     label += f"  -  {title}"
-                self.add_audio_row(aidx, label)
+                self.add_audio_row(aidx, label, stream_language(s) or "")
                 self.audio_tracks.append(s)
                 aidx += 1
             elif s.get("codec_type") == "subtitle":
@@ -2103,7 +2177,7 @@ class AutoFfmpegGui(QMainWindow):
                     label += f"  [{lang_name(lang)}]"
                 if title:
                     label += f"  -  {title}"
-                self.add_subtitle_row(sidx, label)
+                self.add_subtitle_row(sidx, label, stream_language(s) or "")
                 self.subtitle_tracks.append(s)
                 sidx += 1
         self.update_track_heights()
@@ -2247,7 +2321,7 @@ class AutoFfmpegGui(QMainWindow):
     def on_preset_changed(self):
         if hasattr(self, "tbl_encoder_options") and self._encoder_profile_name:
             self.encoder_profile_overrides[self._encoder_profile_name] = \
-                self.encoder_options_from_table()
+                self.encoder_options_from_table(include_disabled=True)
         family = self.current_preset().get("family", "x264")
         if family in ("x264", "x265", "x266"):
             lo, hi, label = 0, 51, "Quality:"
@@ -2266,7 +2340,7 @@ class AutoFfmpegGui(QMainWindow):
             self.cmb_mode.setCurrentIndex(
                 self.cmb_mode.findText("Copy video"))
         if hasattr(self, "cmb_encoder_family") and \
-                family in ("x264", "x265", "x266", "av1"):
+                family in ENCODER_OPTION_SPECS:
             self._encoder_profile_name = self.get_text(self.cmb_preset)
             self.cmb_encoder_family.setCurrentText(family)
             self.load_encoder_catalog()
@@ -2369,13 +2443,15 @@ class AutoFfmpegGui(QMainWindow):
                 sampling=r["sampling"].currentText(),
                 encoder=r["encoder"].currentText().lower(),
                 encoder_options={"__raw__": r["encoder_options"].text()}
-                if r["encoder_options"].text().strip() else {})
+                if r["encoder_options"].text().strip() else {},
+                language=r["lang"].currentText().strip().lower() or None)
             for r in self.audio_rows]
         o.subs = [
             SubtitleSelection(
                 input_index=r["input_index"],
                 enabled=r["check"].isChecked(),
-                burn=r["burn"].isChecked())
+                burn=r["burn"].isChecked(),
+                language=r["lang"].currentText().strip().lower() or None)
             for r in self.subtitle_rows]
         o.trim_start = self.get_text(self.inp_trim_start)
         o.trim_end = self.get_text(self.inp_trim_end)
@@ -2726,15 +2802,8 @@ class AutoFfmpegGui(QMainWindow):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(3)
-        lang = QComboBox()
-        lang.setEditable(True)
-        lang.addItems(["", "und", "ita", "eng", "fra", "deu", "spa", "por",
-                       "jpn", "kor", "zho", "rus", "ara", "hin", "tur",
-                       "pol", "nld", "swe", "dan", "fin", "ell", "heb",
-                       "ces", "ron", "hun", "ukr", "bul", "hrv", "srp"])
-        lang.setEditText(quick_track_language(self.binaries.ffprobe, path, kind))
-        lang.setFixedWidth(66)
-        lang.setToolTip("Track language (ISO 639-2 code, e.g. ita, eng)")
+        lang = self.make_language_combo(
+            quick_track_language(self.binaries.ffprobe, path, kind))
         forced = QCheckBox("forced")
         forced.setToolTip("Mark the track as forced")
         default = QCheckBox("default")

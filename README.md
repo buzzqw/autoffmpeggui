@@ -16,8 +16,10 @@ SPDX-License-Identifier: EUPL-1.2
 ## Features
 
 - H.264, H.265/HEVC, AV1, VP9, MPEG-4, Xvid, MPEG-2, WMV and archive codecs.
-- Per-track audio selection and encoding with channel downmix presets.
-- Per-track subtitle selection, MP4 `mov_text` conversion and subtitle burn-in.
+- Per-track audio selection and encoding with channel downmix presets and
+  editable ISO 639-2 language tags.
+- Per-track subtitle selection, editable language tags, MP4 `mov_text`
+  conversion and subtitle burn-in.
 - Resize, crop, deinterlace and automatic black-border detection.
 - HDR10, HLG, HDR10+, SDR tone mapping and Dolby Vision RPU workflows.
 - **Dolby Vision via `dovi_tool`** (RPU extraction + x265 injection when a
@@ -41,6 +43,9 @@ SPDX-License-Identifier: EUPL-1.2
 - **Tools - Muxing tab**: merge video/audio/subtitle files into one MKV
   (mkvmerge or ffmpeg stream copy) with per-track language, forced/default and
   delay.
+- Source audio and subtitle language tags are detected by `ffprobe` and can be
+  overridden in the **Tracks** tab; the selected value is preserved in direct
+  FFmpeg output and MKV muxing.
 - Encoding queue with live progress, ETA, persistence and post-encode actions.
 - Editable command preview and one-off custom command execution.
 - In-app `profile.txt` editor.
@@ -114,10 +119,15 @@ an editable **Insert filter** list. Type a filter name such as
 **Insert** to add it to the script and the list.
 
 The **Encoder options** tab is always available for codec-specific x264, x265,
-x266/VVC and AV1 settings. The **Tools - Muxing** tab follows it and merges
-separate video, audio and subtitle files without re-encoding. Other specialist
-tools, such as Blu-ray handling, profiles, binary downloads and logs, remain
-available through **Advanced options**.
+x266/VVC, AV1, VP9, MPEG-4, Xvid, MPEG-2, WMV, ProRes, DNxHD and FFV1 settings.
+The **Tracks** tab shows the detected language for every audio and subtitle
+stream. Edit the field with an ISO 639-2 code such as `ita` or `eng` when the
+source tag is missing or incorrect. The override is used for the generated
+metadata during direct encoding and MKV muxing; an empty value keeps the source
+tag. The **Tools - Muxing** tab follows Encoder options and merges separate
+video, audio and subtitle files without re-encoding. Other specialist tools,
+such as Blu-ray handling, profiles, binary downloads and logs, remain available
+through **Advanced options**.
 
 ## Documentation
 

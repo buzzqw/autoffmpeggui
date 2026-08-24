@@ -28,8 +28,8 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 - Hardware encoder detection for NVIDIA NVENC, Intel QSV, AMD AMF, VAAPI and
   Apple VideoToolbox when supported by the installed FFmpeg build.
 - Individual audio-track checkboxes: include or remove each track separately.
-- Individual audio codec, bitrate, channel and sampling-rate settings for
-  every selected track.
+- Individual audio codec, bitrate, channel, sampling-rate and language settings
+  for every selected track.
 - AAC, MP3, FLAC, Vorbis, AC-3 and stream-copy audio modes.
 - Individual subtitle-track selection with MP4-compatible subtitle conversion
   to `mov_text`.
@@ -54,7 +54,8 @@ AutoFFmpegGui is licensed under the **European Union Public Licence v1.2**
 - AviSynth+ tab with generated or external `.avs` scripts, FFMS2 templates,
   plugin loading, editable filter insertion and AviSynth-aware video/audio
   stream mapping.
-- Encoder options tab for x264, x265, x266/VVC and AV1 profile overrides.
+- Encoder options tab for x264, x265, x266/VVC, AV1, VP9, MPEG-4, Xvid, MPEG-2,
+  WMV, ProRes, DNxHD and FFV1 profile overrides.
 - External audio pipelines for LAME, FAAC and `oggenc` when installed.
 - Blu-ray ISO/BDMV source selection through libbluray, including playlist,
   angle and chapter input options.
@@ -302,9 +303,12 @@ For each row:
 1. Check or uncheck the track to include or remove it.
 2. Select its codec.
 3. Select or type its bitrate in kbit/s.
-4. Select the output channel count (with downmix presets such as `5.1 ->
+4. Enter the track language as an ISO 639-2 code, for example `ita`, `eng` or
+   `fra`. The value detected by `ffprobe` is filled in automatically and can be
+   replaced when the source tag is missing or incorrect.
+5. Select the output channel count (with downmix presets such as `5.1 ->
    stereo`), or keep `original`.
-5. Select or type the sampling rate, or keep `auto`.
+6. Select or type the sampling rate, or keep `auto`.
 
 Available audio modes are AAC, MP3, FLAC, OGG/Vorbis, AC-3 and Copy.
 
@@ -333,6 +337,9 @@ re-encoding them.
 Each detected subtitle stream has its own checkbox. Select only the subtitles
 that should be included in the output.
 
+- Set or override the subtitle language with its ISO 639-2 code. An empty field
+  keeps the language tag detected from the source.
+
 - MP4 outputs use FFmpeg's `mov_text` subtitle codec.
 - Other supported containers use subtitle stream copy where appropriate.
 - Blu-ray PGS and other bitmap subtitles cannot be stored in MP4. Select `MKV`
@@ -340,6 +347,10 @@ that should be included in the output.
 - If no subtitle is selected, subtitles are disabled with `-sn`.
 - Tick **Burn** on a text subtitle track to hardcode it into the video.
   Bitmap subtitles (e.g. PGS) cannot be burned in this way.
+
+Language overrides are applied to direct FFmpeg metadata and to the final MKV
+mux command. In **Export separate streams (no mux)** mode, the selected language
+is also carried in the track metadata returned for later muxing.
 
 #### Resize and crop
 

@@ -38,6 +38,10 @@ class TestGuiSmoke(unittest.TestCase):
                 os.path.dirname(os.path.dirname(__file__)), "aaa.vob")
             window.inp_input.setText(window.inputfile)
             self.assertTrue(window.analyze())
+            if window.audio_rows:
+                window.audio_rows[0]["lang"].setEditText("ita")
+                self.assertEqual(window.collect_options().audio[0].language,
+                                 "ita")
             window.output_base = ""
             window.outputfile = ""
             window.inp_output.clear()
@@ -87,6 +91,32 @@ class TestGuiSmoke(unittest.TestCase):
             window.close()
             self.app.processEvents()
             settings.setValue("avisynth_enabled", old_avisynth)
+
+    def test_encoder_option_capabilities_follow_backend(self):
+        window = AutoFfmpegGui()
+        try:
+            def disabled_options():
+                return {
+                    window.tbl_encoder_options.item(row, 1).text()
+                    for row in range(window.tbl_encoder_options.rowCount())
+                    if window.tbl_encoder_options.item(row, 1)
+                    and window.tbl_encoder_options.cellWidget(row, 2)
+                    and not window.tbl_encoder_options.cellWidget(row, 2).isEnabled()
+                }
+
+            self.assertEqual(window.tbl_encoder_options.columnCount(), 4)
+            self.assertNotIn("stats", disabled_options())
+            window.cmb_external_encoder.setCurrentText("x264 CLI (external)")
+            self.assertIn("stats", disabled_options())
+            window.cmb_external_encoder.setCurrentText("FFmpeg (internal)")
+            self.assertNotIn("stats", disabled_options())
+            window.cmb_preset.setCurrentText("H.265 - medium")
+            self.assertIn("bitrate", disabled_options())
+            window.cmb_external_encoder.setCurrentText("x265 CLI (external)")
+            self.assertNotIn("bitrate", disabled_options())
+        finally:
+            window.close()
+            self.app.processEvents()
 
     def test_log_keeps_user_scroll_position(self):
         window = AutoFfmpegGui()
