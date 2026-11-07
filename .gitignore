@@ -52,6 +52,9 @@ __pycache__/
 autoffmpeg.log
 autoffmpeg.log.old
 autoffmpeg_queue.json
+aaa.autoffmpeg/
+applications/
+autoffmpeg_test_*.hevc
 
 config.ini
 Sintel-Bluray.iso
