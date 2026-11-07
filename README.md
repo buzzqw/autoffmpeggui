@@ -204,3 +204,5 @@ output.
 
 If AutoFFmpegGui is useful to you, consider supporting the project via
 [PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=azanzani@gmail.com&item_name=Support+AutoFFmpegGui+Project).
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/buzzqw)
